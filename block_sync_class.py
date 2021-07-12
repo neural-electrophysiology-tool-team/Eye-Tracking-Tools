@@ -90,7 +90,6 @@ class BlockSync:
                 newname = i.name.replace('-', '_')
                 newpath = i.parent / newname
                 i.replace(newpath)
-        arena_files = [x for x in self.arena_path.iterdir()]
         self.arena_videos = [x for x in self.arena_files if x.suffix == '.mp4']
         self.arena_timestamps = [x for x in self.arena_files if x.suffix == '.csv']
         self.arena_vidnames = [i.name for i in self.arena_videos]
