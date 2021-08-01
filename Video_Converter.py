@@ -4,6 +4,7 @@ import pandas as pd
 import glob
 import os
 
+
 def convert_h264_mp4(path):
     files_to_convert = glob.glob(path + r'\**\*.h264', recursive=True)
     converted_files = glob.glob(path + r'\**\*.mp4', recursive=True)
@@ -31,10 +32,12 @@ def validate_no_framedrop(path):
               f'and has {length} frames, it has dropped {num_reported - length} frames')
         cap.release()
 
+
 def stamp_diff_videos(path_to_stamp,stamp):
     videos_to_stamp = glob.glob(path_to_stamp + r'\**\*.mp4', recursive=True)
     for vid in videos_to_stamp:
         os.rename(vid, fr'{vid[:-4]}_{stamp}{vid[-4:]}')
+
 
 path = r'D:\AzulaTrial_21_2_2021\EyeVids\LE'
 convert_h264_mp4(path)
