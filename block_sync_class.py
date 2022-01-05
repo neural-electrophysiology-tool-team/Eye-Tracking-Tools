@@ -1,17 +1,18 @@
 import glob
+import math
 import os
 import subprocess as sp
 from pathlib import Path
-from ellipse import LsqEllipse
-import math
 import cv2
 import numpy as np
 import pandas as pd
 import scipy.stats as stats
 from bokeh.plotting import figure, show
+from bokeh.palettes import Category20c
+from ellipse import LsqEllipse
 from tqdm import tqdm
-import glob
-
+from scipy.signal import medfilt
+from bokeh.models import HoverTool
 '''
 This script defines the BlockSync class which takes all of the relevant data for a given trial and can be utilized
 to produce a synchronized dataframe for all video sources to be used for further analysis
@@ -97,12 +98,20 @@ class BlockSync:
         self.le_ellipses = None
         self.re_ellipses = None
         self.arena_bdf = None
+        self.euclidean_speed_per_frame = None
+        self.movement_df = None
+        self.no_movement_frames = None
+        self.left_eye_pupil_speed = None
+        self.right_eye_pupil_speed = None
+        self.saccade_dict = None
 
     def __str__(self):
         return str(f'animal {self.animal_num}, block {self.block_num}, on {self.exp_date_time}')
 
     def __repr__(self):
-        return str(f'BlockSync object with block_num {self.block_num}')
+        return str(
+            f'BlockSync object for animal {self.animal_num} with \n'
+            f'block_num {self.block_num} at date {self.exp_date_time}')
 
     def handle_arena_files(self):
         """
@@ -131,7 +140,7 @@ class BlockSync:
 
     def handle_eye_videos(self):
         """
-        This method converts and renames the eye tracking videos in the files tree ino workable .mp4 files
+        This method converts and renames the eye tracking videos in the files tree into workable .mp4 files
         """
         eye_vid_path = self.block_path / 'eye_videos'
         print('converting videos...')
@@ -195,7 +204,7 @@ class BlockSync:
         else:
             return index_of_lowest_diff
 
-    def synchronize_arena_timestamps(self, return_dfs=False, export_sync_df=False):
+    def synchronize_arena_timestamps(self, return_dfs=False, export_sync_df=False, get_only_anchor_vid=False):
         """
         This function reads the different arena timestamps files, chooses the longest as an anchor and fits
         frames corresponding with the closest timestamp to the anchor.
@@ -215,6 +224,8 @@ class BlockSync:
         anchor_vid = df_list[anchor_ind]
         self.anchor_vid_name = self.arena_vidnames[anchor_ind]
 
+        if get_only_anchor_vid:
+            return
         # construct a synchronization dataframe
         self.arena_sync_df = pd.DataFrame(data=[],
                                           columns=self.arena_vidnames,
@@ -222,7 +233,7 @@ class BlockSync:
 
         # populate the df, starting with the anchor:
         self.arena_sync_df[self.arena_sync_df.columns[anchor_ind]] = range(len(anchor_vid))
-        vids_to_sync = list(self.arena_sync_df.drop(axis=1, labels=self.anchor_vid_name).columns)# CHECK ME !!!!
+        vids_to_sync = list(self.arena_sync_df.drop(axis=1, labels=self.anchor_vid_name).columns)  # CHECK ME !!!!
         anchor_df = df_list.pop(anchor_ind)
         df_to_sync = df_list
         # iterate over rows and videos to find the corresponding frames
@@ -356,6 +367,24 @@ class BlockSync:
                            line_color=color_list[ind])
         show(bokeh_fig)
 
+    def validate_arena_synchronization_bdf(self):
+        if self.arena_bdf is None:
+            print('No arena_bdf, run the create_arena_brightness_df method')
+        x_axis = range(len(self.arena_bdf.index))
+        columns = self.arena_bdf.columns
+        bokeh_fig = figure(title=f'Block Number {self.block_num} Arena Video Synchronization Verify',
+                           x_axis_label='Frame',
+                           y_axis_label='Z_Score',
+                           plot_width=1500,
+                           plot_height=700
+                           )
+        color_list = ['orange', 'purple', 'teal', 'green', 'red']
+        for ind, video in enumerate(columns):
+            bokeh_fig.line(x_axis, self.arena_bdf[video],
+                           legend_label=video,
+                           line_width=1,
+                           line_color=color_list[ind])
+        show(bokeh_fig)
 
     @staticmethod
     def get_frame_timeseries(df, channel):
@@ -406,6 +435,7 @@ class BlockSync:
         """
         Method for importing the Open Ephys events.csv results of the OETrialReporter.ipynb mini-pipe
         defines
+        This also defines the correct beginning and ending times of a block (in the OE reference frame)
 
         """
         # first, parse the events of the open-ephys recording
@@ -420,9 +450,35 @@ class BlockSync:
             self.ts_dict[f'{channel}'] = ts
             if channel == 'Arena_TTL':
                 ttl_breaks = np.where(np.diff(ts.values) > 0.5)
-                self.block_starts = ts[ttl_breaks[0][0]+1]
-                self.block_ends = ts[ttl_breaks[0][1]]
-                self.block_length = self.block_ends - self.block_starts
+
+        # Now, determine which camera shot its first frame last to define the block start:
+        if self.ts_dict['L_eye_TTL'][0] - self.ts_dict['R_eye_TTL'][0] > 0:
+            last_to_start = 'L_eye_TTL'
+        else:
+            last_to_start = 'R_eye_TTL'
+        # determine if the arena break in ttls happened before or after the last eye to start
+        ttl_breaks = np.where(np.diff(self.ts_dict['Arena_TTL'].values) > 0.5)
+        arena_starts = self.ts_dict['Arena_TTL'][ttl_breaks[0][0]]
+        if self.ts_dict[last_to_start][0] < arena_starts:
+            self.block_starts = arena_starts
+            print(f'The first block frame came from the Arena_video')
+        else:
+            self.block_starts = self.ts_dict[last_to_start][0]
+            print(f'The first block frame came from the {last_to_start}')
+        # next, determine which camera shot its last shot first:
+        if self.ts_dict['L_eye_TTL'].iloc[-1] - self.ts_dict['R_eye_TTL'].iloc[-1] < 0:
+            first_to_end = 'L_eye_TTL'
+        else:
+            first_to_end = 'R_eye_TTL'
+        # determine if the arena break in ttls happened before or after the last eye to start
+        arena_ends = self.ts_dict['Arena_TTL'][ttl_breaks[0][1]]
+        if self.ts_dict[first_to_end].iloc[-1] < arena_ends:
+            self.block_ends = self.ts_dict[first_to_end].iloc[-1]
+            print(f'The last frame of the block came from {first_to_end}')
+        else:
+            self.block_ends = arena_ends
+            print('The last frame came from the Arena Video')
+
     @staticmethod
     def get_closest_frame(timestamp, vid_timeseries, report_acc=None):
         """
@@ -598,8 +654,14 @@ class BlockSync:
         print(threshold)
         if len(suspect_list) > 10 or threshold >= -1:
             print('bad arena brightness df, manual synchronization required')
-            self.validate_arena_synchronization()
-            arena_blink_ind = input('please identify and enter the led blink frame:')
+            self.validate_arena_synchronization_bdf()
+            int_flag = 0
+            while int_flag == 0:
+                try:
+                    arena_blink_ind = int(input('please identify and enter the led blink frame:'))
+                    int_flag = 1
+                except ValueError:
+                    print('That was not a valid number, try again...')
         else:
             arena_blink_ind = suspect_list[0]
         search_range = range(arena_blink_ind-50, arena_blink_ind+50)
@@ -671,6 +733,8 @@ class BlockSync:
             self.re_ellipses.to_csv(self.block_path / 'analysis/re_ellipses.csv')
         if self.le_ellipses is not None:
             self.le_ellipses.to_csv(self.block_path / 'analysis/le_ellipses.csv')
+        if self.arena_sync_df is not None:
+            self.arena_sync_df.to_csv(self.block_path / 'analysis/arena_sync_df.csv')
 
     def import_everything(self):
         """
@@ -700,6 +764,10 @@ class BlockSync:
         if p_le_ellipses.exists():
             self.le_ellipses = pd.read_csv(p_le_ellipses,
                                            index_col=0)
+        p_arena_sync_df = self.block_path / 'analysis/arena_sync_df.csv'
+        if p_arena_sync_df.exists():
+            self.arena_sync_df = pd.read_csv(p_arena_sync_df,
+                                             index_col=0)
 
     def manual_sync(self, threshold_value_for_eyes):
         print('This is a manual synchronization step, a graph should appear now...')
@@ -714,7 +782,6 @@ class BlockSync:
         self.synced_videos['L_eye_TTL'] = self.synced_videos['L_eye_TTL'] + le_drift
         self.create_eye_brightness_df(threshold_value=threshold_value_for_eyes)
         self.validate_eye_synchronization()
-
 
     @staticmethod
     def eye_tracking_analysis(dlc_video_analysis_csv, uncertainty_thr):
@@ -829,3 +896,661 @@ class BlockSync:
             self.re_video_sync_df.loc[row, 'ellipse_size'] = self.re_ellipses.ellipse_size[frame]
             # re_video_sync_df.at[row, 'rostral_edge'] = re_ellipses.rostral_edge[frame]
             # re_video_sync_df.at[row, 'caudal_edge'] = re_ellipses.caudal_edge[frame]
+
+    def get_image_events_frames(self, arena_col='Arena_TTL'):
+        if self.arena_first_ttl_frame is None:
+            self.arena_first_ttl_frame = self.synced_videos_validated[arena_col][0]
+        self.stim_events = pd.read_csv(self.arena_path / 'events.csv')
+        # get internal timestamps for the arena
+        anchor_vid_csv = self.anchor_vid_name[:-4] + '.csv'
+        self.arena_internal_timestamps = pd.read_csv(self.arena_path / anchor_vid_csv)
+        # get image_on_files, image_on_times and image_off_times
+        self.image_on_files = self.stim_events.query('event == "show_image"').value
+        self.image_on_times = self.stim_events.query('event == "show_image"').time
+        self.image_off_times = self.stim_events.query('event == "image_off"').time
+
+        # match between stim times and arena frames
+        self.stim_on_arena_frames = []
+        for time in self.image_on_times.values:
+            frame = self.get_closest_frame(time, self.arena_internal_timestamps) + self.arena_first_ttl_frame
+            self.stim_on_arena_frames.append(frame)
+        self.stim_off_arena_frames = []
+        for time in self.image_off_times:
+            frame = self.get_closest_frame(time, self.arena_internal_timestamps) + self.arena_first_ttl_frame
+            self.stim_off_arena_frames.append(frame)
+
+    def led_speed_analysis(self, speed_threshold=0.05, plot_graph=False):
+
+        # import the dlc_csvs and collect the data from all videos in a dataframe
+        m_csvs = list((self.block_path / 'gaze_vector').glob('*.csv'))
+        csv_dict = {}
+        # create the csv dict to iterate over
+        for i in range(len(m_csvs)):
+            csv_dict[f'csv_{i}'] = pd.read_csv(m_csvs[i], header=1)
+
+        # iterate and sort the data from the dlc into location_data
+        location_data = {}
+        uncertainty_thr = 0.5
+        for i in range(len(m_csvs)):
+            data = csv_dict[f'csv_{i}']
+            # import the dataframe and convert it to floats
+            data = data.iloc[1:].apply(pd.to_numeric)
+            # sort the pupil elements to x and y, with p as probability
+            led_elements = np.array([x for x in data.columns if 'bodyparts' not in x])
+            led_xs = data[led_elements[np.arange(0, len(led_elements), 3)]]
+            led_ys = data[led_elements[np.arange(1, len(led_elements), 3)]]
+            led_ps = data[led_elements[np.arange(2, len(led_elements), 3)]]
+            # rename dataframes for masking with p values of bad points:
+            led_ps = led_ps.rename(columns=dict(zip(led_ps.columns, led_xs.columns)))
+            led_ys = led_ys.rename(columns=dict(zip(led_ys.columns, led_xs.columns)))
+            good_points = led_ps > uncertainty_thr
+            led_xs = led_xs[good_points]
+            led_ys = led_ys[good_points]
+            # Data collection into dict
+            location_data[f'led_xs_{i}'] = led_xs
+            location_data[f'led_ys_{i}'] = led_ys
+            location_data[f'led_ps_{i}'] = led_ps
+
+        # convert dict into movement_df for iterative processing
+        dict_for_df = {}
+        for i in range(len(m_csvs)):
+            dfx = location_data[f'led_xs_{i}']
+            dfy = location_data[f'led_ys_{i}']
+            new_columns_x = dfx.columns.values + f'_x_{i}'
+            new_columns_y = dfy.columns.values + f'_y_{i}'
+            dict_for_df[f'led_xs_{i}'] = dfx.rename(columns=dict(zip(dfx.columns.values, list(new_columns_x))))
+            dict_for_df[f'led_ys_{i}'] = dfy.rename(columns=dict(zip(dfy.columns.values, list(new_columns_y))))
+        df_list = [dict_for_df[x] for x in dict_for_df.keys()]
+        movement_df = pd.concat(df_list, 1)
+
+        # mark acceptable frames as those that have at least 20 active traces
+        good_rows = []
+        bad_rows = []
+        for row in tqdm(range(0, len(movement_df))):
+            count = 0
+            for column in movement_df.columns:
+                if not np.isnan(movement_df[f'{column}'].iloc[row]):
+                    count += 1
+            if count > 20:
+                good_rows.append(row)
+            else:
+                bad_rows.append(row)
+
+        # derivative based analysis:
+        all_diffs_x = []
+        all_diffs_y = []
+        for col in movement_df.columns:
+            y = movement_df[col].values
+            x = list(range(len(movement_df)))
+            dydx = np.diff(y) / np.diff(x)
+            if 'x' in str(col):
+                all_diffs_x.append(dydx)
+            elif 'y' in str(col):
+                all_diffs_y.append(dydx)
+            else:
+                print('weird, try again')
+        all_diffs_x = np.array(all_diffs_x)
+        all_diffs_y = np.array(all_diffs_y)
+        all_diffs_dict = {'y': all_diffs_y,
+                          'x': all_diffs_x}
+
+        mean_speed_dict = {
+            'x': [],
+            'y': []
+        }
+        for key in ['x', 'y']:
+            for i in range(len(all_diffs_dict[key][0])):
+                # find the non nan values to work with:
+                non_nans = []
+                for j in range(len(all_diffs_dict[key])):
+                    if not np.isnan(all_diffs_dict[key][j][i]):
+                        non_nans.append(j)
+                if len(non_nans) != 0:
+                    mean = np.sum(all_diffs_dict[key][non_nans, i]) / len(non_nans)
+                    mean_speed_dict[key].append(mean)
+                else:
+                    mean_speed_dict[key].append(np.nan)
+                    if np.isnan(mean):
+                        print('try again')
+                        print(i)
+                        print(non_nans)
+                        break
+        # euclidean speed calc
+        x_sqrd = np.power(np.array(mean_speed_dict['x']), np.array([2]))
+        y_sqrd = np.power(np.array(mean_speed_dict['y']), np.array([2]))
+        euclidean_speed = np.sqrt(x_sqrd + y_sqrd)
+        self.euclidean_speed_per_frame = euclidean_speed
+        self.movement_df = movement_df
+        low_speed_segments = euclidean_speed < speed_threshold
+        low_speed_segments = medfilt(low_speed_segments, 15)
+        self.no_movement_frames = np.argwhere(low_speed_segments)[:, 0] + self.arena_first_ttl_frame - 1
+        if plot_graph:
+            bokeh_fig = figure(title=f'speed movement analysis {print(self)}',
+                               x_axis_label='Linear Frames',
+                               y_axis_label='location in frame (colors) / speed(black) - Z score',
+                               plot_width=1500,
+                               plot_height=700
+                               )
+            mean_speed = euclidean_speed
+            bokeh_fig.line(
+                list(range(len(mean_speed))),
+                np.abs((mean_speed - np.mean(mean_speed[~np.isnan(mean_speed)])) / np.std(
+                    np.array(mean_speed)[~np.isnan(mean_speed)])),
+                legend_label='speed',
+                line_width=0.3,
+                line_color='black')
+            for num, col in enumerate(movement_df.columns):
+                if 'y' in col:
+                    try:
+                        color = Category20c[20][num]
+                    except IndexError:
+                        color = 'green'
+                elif 'x' in col:
+                    try:
+                        color = Category20c[20][-num]
+                    except IndexError:
+                        color = 'red'
+                bokeh_fig.line(movement_df[col].index,
+                               np.abs((movement_df[col].values - movement_df[col].mean()) / movement_df[col].std()),
+                               legend_label=col,
+                               line_width=1.5,
+                               line_color=color)
+
+            bokeh_fig.vbar(x=self.no_movement_frames,
+                           width=1,
+                           bottom=-4,
+                           top=-1,
+                           alpha=0.15,
+                           color='green')
+            show(bokeh_fig)
+
+    def pupil_speed_graph(self,
+                          plot_r=True,
+                          plot_l=True,
+                          plot_l_position=True,
+                          plot_r_position=True,
+                          smooth_velocities=False,
+                          sf = 3):
+        lx = self.le_video_sync_df.center_x.values
+        ly = self.le_video_sync_df.center_y.values
+        rx = self.re_video_sync_df.center_x.values
+        ry = self.re_video_sync_df.center_y.values
+        if smooth_velocities:
+            diff_dict = {
+                'lx': np.array([lx[x + sf] - lx[x] for x in range(len(lx) - sf)]),
+                'ly': np.array([ly[x + sf] - ly[x] for x in range(len(ly) - sf)]),
+                'rx': np.array([rx[x + sf] - rx[x] for x in range(len(rx) - sf)]),
+                'ry': np.array([ry[x + sf] - ry[x] for x in range(len(ry) - sf)])
+            }
+        else:
+            diff_dict = {
+                'lx': np.diff(lx, prepend=1).astype(float),
+                'ly': np.diff(ly, prepend=1).astype(float),
+                'rx': np.diff(rx, prepend=1).astype(float),
+                'ry': np.diff(ry, prepend=1).astype(float),
+            }
+        l_e_dist = np.sqrt((diff_dict['lx'] ** 2) + (diff_dict['ly'] ** 2))
+        r_e_dist = np.sqrt((diff_dict['rx'] ** 2) + (diff_dict['ry'] ** 2))
+        self.left_eye_pupil_speed = l_e_dist
+        self.right_eye_pupil_speed = r_e_dist
+        bokeh_fig = figure(title=f'Pupil center speed for {self.__str__()}',
+                           x_axis_label='Linear Frames',
+                           y_axis_label='euclidean speed',
+                           plot_width=1500,
+                           plot_height=700)
+        x_axis = self.synced_videos_validated.Arena_TTL.values - self.arena_first_ttl_frame
+        if plot_l:
+            bokeh_fig.line(x_axis,
+                           l_e_dist[0:len(x_axis)],
+                           legend_label='Left Eye Speed',
+                           line_width=1.5,
+                           line_color='blue')
+        if plot_r:
+            bokeh_fig.line(x_axis,
+                           -r_e_dist[0:len(x_axis)],
+                           legend_label='Inverse Right Eye Speed',
+                           line_width=1.5,
+                           line_color='red')
+        if plot_l_position:
+            bokeh_fig.line(x_axis,
+                           ((self.le_video_sync_df.center_x - self.le_video_sync_df.center_x.mean()) /
+                            self.le_video_sync_df.center_x.std())[0:len(x_axis)],
+                           legend_label='left_pupil_position_X',
+                           line_width=1.5,
+                           line_color='purple')
+
+            bokeh_fig.line(x_axis,
+                           ((self.le_video_sync_df.center_y - self.le_video_sync_df.center_y.mean()) /
+                            self.le_video_sync_df.center_y.std())[0:len(x_axis)],
+                           legend_label='left_pupil_position_y',
+                           line_width=1.5,
+                           line_color='lavender')
+        if plot_r_position:
+            bokeh_fig.line(x_axis,
+                           ((self.re_video_sync_df.center_x - self.re_video_sync_df.center_x.mean()) /
+                            self.re_video_sync_df.center_x.std())[0:len(x_axis)],
+                           legend_label='right_pupil_position_X',
+                           line_width=1.5,
+                           line_color='firebrick')
+
+            bokeh_fig.line(x_axis,
+                           ((self.re_video_sync_df.center_y - self.re_video_sync_df.center_y.mean()) /
+                            self.re_video_sync_df.center_y.std())[0:len(x_axis)],
+                           legend_label='right_pupil_position_y',
+                           line_width=1.5,
+                           line_color='pink')
+
+        bokeh_fig.vbar(x=self.no_movement_frames - self.arena_first_ttl_frame,
+                       width=1,
+                       bottom=-4,
+                       top=-1,
+                       alpha=0.2,
+                       color='green')
+        show(bokeh_fig)
+
+    def block_plot(self, plot_saccade_locs=False, saccade_frames_r=None, saccade_frames_l=None, plot_stim_on_off=False):
+
+        # Extract the data columns and calculate Z-score across all blocks
+        le_ellipses_z = (self.le_video_sync_df.ellipse_size - self.le_video_sync_df.ellipse_size.mean()) / self.le_video_sync_df.ellipse_size.std()
+        re_ellipses_z = (self.re_video_sync_df.ellipse_size - self.re_video_sync_df.ellipse_size.mean()) / self.re_video_sync_df.ellipse_size.std()
+        le_x_zscores = (self.le_video_sync_df.center_x - np.mean(self.le_video_sync_df.center_x)) / self.le_video_sync_df.center_x.std()
+        le_y_zscores = (self.le_video_sync_df.center_y - np.mean(self.le_video_sync_df.center_y)) / self.le_video_sync_df.center_y.std()
+        re_x_zscores = (self.re_video_sync_df.center_x - np.mean(self.re_video_sync_df.center_x)) / self.re_video_sync_df.center_x.std()
+        re_y_zscores = (self.re_video_sync_df.center_y - np.mean(self.re_video_sync_df.center_y)) / self.re_video_sync_df.center_y.std()
+        x_axis = range(len(le_ellipses_z))
+        # plot everything
+        bokeh_fig = figure(title=f'Pupil combined metrics block {self.block_num}',
+                           x_axis_label='Linear Frames',
+                           y_axis_label=' Z scores',
+                           plot_width=1500,
+                           plot_height=700
+                           )
+        bokeh_fig.add_tools(HoverTool())
+        bokeh_fig.line(x_axis, le_ellipses_z + 7, legend_label='Left Eye diameter', line_width=1.5, line_color='blue')
+        bokeh_fig.line(x_axis, le_x_zscores + 14, legend_label='Left Eye x position', line_width=1, line_color='cyan')
+        bokeh_fig.line(x_axis, le_y_zscores, legend_label='Left Eye y position', line_width=1, line_color='green')
+        bokeh_fig.line(x_axis, re_ellipses_z + 7, legend_label='Right Eye diameter', line_width=1.5, line_color='red')
+        bokeh_fig.line(x_axis, re_x_zscores + 14, legend_label='Right Eye x position', line_width=1,
+                       line_color='orange')
+        bokeh_fig.line(x_axis, re_y_zscores, legend_label='Right Eye y position', line_width=1, line_color='pink')
+        if plot_stim_on_off:
+            bokeh_fig.vbar(x=self.stim_on_arena_frames, width=1, bottom=-4, top=17, alpha=0.5, color='green')
+            bokeh_fig.vbar(x=self.stim_off_arena_frames, width=1, bottom=-4, top=17, alpha=0.5, color='red')
+        if plot_saccade_locs:
+            bokeh_fig.vbar(x=saccade_frames_l, width=1, bottom=-4, top=-1, alpha=0.8, color='purple')
+            bokeh_fig.vbar(x=saccade_frames_r, width=1, bottom=-4, top=-1, alpha=0.8, color='brown')
+        show(bokeh_fig)
+
+    def collect_saccade_events_v3(self, threshold=2):
+        flag = 0
+        while flag == 0:
+            l_saccades = np.argwhere(self.left_eye_pupil_speed > threshold)
+            l_saccades = medfilt(l_saccades[:, 0], 5)
+            r_saccades = np.argwhere(self.right_eye_pupil_speed > threshold)
+            r_saccades = medfilt(r_saccades[:, 0], 5)
+            self.block_plot(plot_saccade_locs=True, saccade_frames_r=r_saccades, saccade_frames_l=l_saccades)
+            answer = input('look at the graph - is the threshold for speed okay? y/n or abort')
+            if answer == 'y':
+                flag = 1
+            elif answer == 'n':
+                threshold = float(input('insert another threshold value to try'))
+            elif answer == 'abort':
+                print('giving up on the block')
+                return None
+            else:
+                print('bad input, going around again...')
+
+        # use detected saccades locations for saccade characterisation
+        # find consequitive frames and understand how many saccades there are in the trace for each axis:
+        s_dict = {}
+        for eye in ['l', 'r']:
+            s_start = []
+            s_mid = []
+            s_end = []
+            state = 'start'
+            if eye == 'l':
+                for i in range(len(l_saccades)-1):
+                    if state == 'start':
+                        s_start.append(l_saccades[i])
+                        state = 'mid'
+                        continue
+                    if l_saccades[i]+1 == l_saccades[i+1]:
+                        s_mid.append(l_saccades[i])
+                        state = 'mid'
+                    else:
+                        s_end.append(l_saccades[i])
+                        state = 'start'
+                s_end.append(l_saccades[-1])
+
+            if eye == 'r':
+                for i in range(len(r_saccades)-1):
+                    if state == 'start':
+                        s_start.append(r_saccades[i])
+                        state = 'mid'
+                        continue
+                    if r_saccades[i]+1 == r_saccades[i+1]:
+                        s_mid.append(r_saccades[i])
+                        state = 'mid'
+                    else:
+                        s_end.append(r_saccades[i])
+                        state = 'start'
+                s_end.append(r_saccades[-1])
+
+            s_dict[f'{eye}_start'] = s_start
+            s_dict[f'{eye}_ends'] = s_end
+            if len(s_end) == len(s_start):
+                s_dict[f'{eye}_len'] = np.array(s_end) - np.array(s_start)
+            elif len(s_end) == len(s_start)+1:
+                if s_end[-2] == s_end[-1]:
+                    s_end.pop(-1)
+                    s_dict[f'{eye}_len'] = np.array(s_end) - np.array(s_start)
+            else:
+                print(f'there is a length problem where the saccades have {len(s_end)} ends and {len(s_start)} starts')
+                return None
+            # choose saccades with sufficient length
+            s_dict[f'{eye}_start'] = np.array(s_dict[f'{eye}_start'])[list(np.argwhere(s_dict[f'{eye}_len'] > 5)[:, 0])]
+            s_dict[f'{eye}_ends'] = np.array(s_dict[f'{eye}_ends'])[list(np.argwhere(s_dict[f'{eye}_len'] > 5)[:, 0])]
+
+        # collect all saccade x y info within a 25 frame window
+        for eye in ['l', 'r']:
+            s_dict[f'{eye}_y_loc'] = []
+            s_dict[f'{eye}_x_loc'] = []
+            for i in range(len(s_dict[f'{eye}_start'])):
+                x_axis = range(int(s_dict[f'{eye}_start'][i]-25), int(s_dict[f'{eye}_start'][i] + 25))
+                if eye == 'l':
+                    y_data = self.le_video_sync_df.center_y[x_axis]
+                    x_data = self.le_video_sync_df.center_x[x_axis]
+                    s_dict[f'{eye}_y_loc'].append(y_data)
+                    s_dict[f'{eye}_x_loc'].append(x_data)
+                elif eye == 'r':
+                    y_data = self.re_video_sync_df.center_y[x_axis]
+                    x_data = self.re_video_sync_df.center_x[x_axis]
+                    s_dict[f'{eye}_y_loc'].append(y_data)
+                    s_dict[f'{eye}_x_loc'].append(x_data)
+        saccade_dict = {
+            'l': [],
+            'r': []
+        }
+
+        # compute all saccades euclidean distance
+        magnitude_dict = {'l': [],
+                          'r': []}
+        for eye in ['l', 'r']:
+            for i in range(len(s_dict[f'{eye}_start'])):
+                starting_pos_x = s_dict[f'{eye}_x_loc'][i].iloc[25]
+                starting_pos_y = s_dict[f'{eye}_y_loc'][i].iloc[25]
+                s_frames = s_dict[f'{eye}_y_loc'][i].index.values
+                r = []
+                for frame in s_frames:
+                    a = (s_dict[f'{eye}_y_loc'][i].loc[frame] - starting_pos_y) ** 2
+                    b = (s_dict[f'{eye}_x_loc'][i].loc[frame] - starting_pos_x) ** 2
+                    r.append(np.sqrt(a + b))
+                r_min = np.min(r)
+                r_max = np.max(r)
+                magnitude_dict[f'{eye}'].append(r_max - r_min)
+                r_normalized = [(x - r_min) / (r_max - r_min) for x in r]
+                saccade_dict[f'{eye}'].append(r_normalized)
+        self.saccade_dict = saccade_dict
+
+        # create the saccade df and slowly fill it up
+        saccade_list = []
+        for eye in ['r', 'l']:
+            for row in range(len(s_dict[f'{eye}_start'])):
+                entry = {
+                    'starts': s_dict[f'{eye}_start'][row],
+                    'ends': s_dict[f'{eye}_ends'][row],
+                    'magnitude': magnitude_dict[f'{eye}'][row],
+                    'velocity': magnitude_dict[f'{eye}'][row] / len(self.saccade_dict[f'{eye}'][row]),
+                    'head_movement': None,
+                    'dynamics': self.saccade_dict[f'{eye}'][row]
+                }
+                saccade_list.append(entry)
+
+        self.saccade_list = saccade_list
+
+    def collect_saccade_events_full_dynamics(self, threshold=2):
+        flag = 0
+        while flag == 0:
+            l_saccades = np.argwhere(self.left_eye_pupil_speed > threshold)
+            l_saccades = medfilt(l_saccades[:, 0], 5)
+            r_saccades = np.argwhere(self.right_eye_pupil_speed > threshold)
+            r_saccades = medfilt(r_saccades[:, 0], 5)
+            self.block_plot(plot_saccade_locs=True, saccade_frames_r=r_saccades, saccade_frames_l=l_saccades)
+            answer = input('look at the graph - is the threshold for speed okay? y/n or abort')
+            if answer == 'y':
+                flag = 1
+            elif answer == 'n':
+                threshold = float(input('insert another threshold value to try'))
+            elif answer == 'abort':
+                print('giving up on the block')
+                return None
+            else:
+                print('bad input, going around again...')
+
+        # use detected saccades locations for saccade characterisation
+        # find consequitive frames and understand how many saccades there are in the trace for each axis:
+        s_dict = {}
+        for eye in ['l', 'r']:
+            s_start = []
+            s_mid = []
+            s_end = []
+            state = 'start'
+            if eye == 'l':
+                for i in range(len(l_saccades)-1):
+                    if state == 'start':
+                        s_start.append(l_saccades[i])
+                        state = 'mid'
+                        continue
+                    if l_saccades[i]+1 == l_saccades[i+1]:
+                        s_mid.append(l_saccades[i])
+                        state = 'mid'
+                    else:
+                        s_end.append(l_saccades[i])
+                        state = 'start'
+                s_end.append(l_saccades[-1])
+
+            if eye == 'r':
+                for i in range(len(r_saccades)-1):
+                    if state == 'start':
+                        s_start.append(r_saccades[i])
+                        state = 'mid'
+                        continue
+                    if r_saccades[i]+1 == r_saccades[i+1]:
+                        s_mid.append(r_saccades[i])
+                        state = 'mid'
+                    else:
+                        s_end.append(r_saccades[i])
+                        state = 'start'
+                s_end.append(r_saccades[-1])
+
+            s_dict[f'{eye}_start'] = s_start
+            s_dict[f'{eye}_ends'] = s_end
+            if len(s_end) == len(s_start):
+                s_dict[f'{eye}_len'] = np.array(s_end) - np.array(s_start)
+            elif len(s_end) == len(s_start)+1:
+                if s_end[-2] == s_end[-1]:
+                    s_end.pop(-1)
+                    s_dict[f'{eye}_len'] = np.array(s_end) - np.array(s_start)
+            else:
+                print(f'there is a length problem where the saccades have {len(s_end)} ends and {len(s_start)} starts')
+                return None
+            # choose saccades with sufficient length
+            s_dict[f'{eye}_start'] = np.array(s_dict[f'{eye}_start'])[list(np.argwhere(s_dict[f'{eye}_len'] > 5)[:, 0])]
+            s_dict[f'{eye}_ends'] = np.array(s_dict[f'{eye}_ends'])[list(np.argwhere(s_dict[f'{eye}_len'] > 5)[:, 0])]
+
+        # collect all saccade x y info within a 25 frame window
+        velocity_dict = {
+            'l_velocity': [],
+            'r_velocity': []
+        }
+        for eye in ['l', 'r']:
+            s_dict[f'{eye}_y_loc'] = []
+            s_dict[f'{eye}_x_loc'] = []
+            for i in range(len(s_dict[f'{eye}_start'])):
+                try:
+                    x_axis = range(int(s_dict[f'{eye}_start'][i]-25), int(s_dict[f'{eye}_start'][i] + 25))
+                except KeyError:
+                    continue
+                if eye == 'l':
+                    try:
+                        y_data = self.le_video_sync_df.center_y[x_axis]
+                        x_data = self.le_video_sync_df.center_x[x_axis]
+                    except KeyError:
+                        continue
+                    s_dict[f'{eye}_y_loc'].append(y_data)
+                    s_dict[f'{eye}_x_loc'].append(x_data)
+                    velocity_dict[f'{eye}_velocity'].append(self.left_eye_pupil_speed[x_axis])
+                elif eye == 'r':
+                    try:
+                        y_data = self.re_video_sync_df.center_y[x_axis]
+                        x_data = self.re_video_sync_df.center_x[x_axis]
+                    except KeyError:
+                        continue
+                    s_dict[f'{eye}_y_loc'].append(y_data)
+                    s_dict[f'{eye}_x_loc'].append(x_data)
+                    velocity_dict[f'{eye}_velocity'].append(self.right_eye_pupil_speed[x_axis])
+        saccade_dict = {
+            'l': [],
+            'r': []
+        }
+
+        # compute all saccades euclidean distance
+        magnitude_dict = {'l': [],
+                          'r': []}
+        for eye in ['l', 'r']:
+            for i in range(len(s_dict[f'{eye}_start'])):
+                try:
+                    starting_pos_x = s_dict[f'{eye}_x_loc'][i].iloc[25]
+                    starting_pos_y = s_dict[f'{eye}_y_loc'][i].iloc[25]
+                    s_frames = s_dict[f'{eye}_y_loc'][i].index.values
+                except IndexError:
+                    continue
+                r = []
+                for frame in s_frames:
+                    a = (s_dict[f'{eye}_y_loc'][i].loc[frame] - starting_pos_y) ** 2
+                    b = (s_dict[f'{eye}_x_loc'][i].loc[frame] - starting_pos_x) ** 2
+                    r.append(np.sqrt(a + b))
+                # Normalize for before (b) and saccade (s)
+                rs_min = np.min(r[25:])
+                rs_max = np.max(r[25:])
+                rb_min = np.min(r[0:25])
+                rb_max = np.max(r[0:25])
+                magnitude_dict[f'{eye}'].append(rs_max - rs_min)
+                rs_normalized = [(x - rs_min) / (rs_max - rs_min) for x in r[25:]]
+                rb_normalized = [((x - rb_min) / (rb_max - rb_min)) for x in r[0:25]]
+                r_normalized = rb_normalized + rs_normalized
+                saccade_dict[f'{eye}'].append(r_normalized)
+
+        self.saccade_dict = saccade_dict
+
+        # create the saccade df and slowly fill it up
+        saccade_df = pd.DataFrame(data=None, columns=['starts', 'ends', 'magnitude', 'velocity', 'head_movements', 'r_dynamics'])
+        saccade_list = []
+        for eye in ['r', 'l']:
+            for row in range(len(s_dict[f'{eye}_start'])):
+                try:
+                    entry = {
+                        'starts': s_dict[f'{eye}_start'][row],
+                        'ends': s_dict[f'{eye}_ends'][row],
+                        'magnitude': magnitude_dict[f'{eye}'][row],
+                        'velocity': velocity_dict[f'{eye}_velocity'][row],
+                        'head_movement': None,
+                        'r_dynamics': self.saccade_dict[f'{eye}'][row],
+                        'x_dynamics': s_dict[f'{eye}_x_loc'][row],
+                        'y_dynamics': s_dict[f'{eye}_y_loc'][row]
+                    }
+                except IndexError:
+                    continue
+                saccade_list.append(entry)
+
+        self.saccade_list = saccade_list
+
+    def create_synced_video(self, filename, r_eye_vid, l_eye_vid, arena_vid1, arena_vid2, start_time, end_time, frmt='H264', overlay_frame_numbers = False):
+        """
+        This function takes as input the names of 4 videos and concatenates them into a unified video
+        The block has to be correctly synchronized in order to produce the video
+        :param filename: name of the output file to save
+        :param r_eye_vid: Top Right Vid
+        :param l_eye_vid: Top Left Vid
+        :param arena_vid1: Bottom Right Vid
+        :param arena_vid2: Bottom Left Vid
+        :param start_time: in seconds
+        :param end_time: in seconds
+        :param format: H264 by default
+        :param overlay_frame_numbers:   If true prints the frame numbers used for each frame on the video,
+                                        defaults to false
+        :return:
+        """
+        re_cap = cv2.VideoCapture(r_eye_vid)
+        le_cap = cv2.VideoCapture(l_eye_vid)
+        ar1_cap = cv2.VideoCapture(arena_vid1)
+        ar2_cap = cv2.VideoCapture(arena_vid2)
+        timeseries = self.synced_videos_validated.query('Time>@start_time & Time<@end_time')
+        timeseries.Arena_TTL = timeseries.Arena_TTL - self.arena_first_ttl_frame
+        p_arena_frame = int(timeseries.iloc[1]['Arena_TTL'])
+        p_l_eye_frame = int(timeseries.iloc[1]['L_eye_TTL'])
+        p_r_eye_frame = int(timeseries.iloc[1]['R_eye_TTL'])
+        anchor = 0
+        fourcc = cv2.VideoWriter_fourcc(*frmt)
+        out = cv2.VideoWriter(str(self.block_path / str(filename + '.mp4')), fourcc, 60.0, (640*2, 480*2))
+        try:
+            while ar1_cap.isOpened():
+                arena_frame = int(timeseries.iloc[anchor]['Arena_TTL'])
+                r_eye_frame = int(timeseries.iloc[anchor]['R_eye_TTL'])
+                l_eye_frame = int(timeseries.iloc[anchor]['L_eye_TTL'])
+
+                # Arena Frame 1
+                if arena_frame != p_arena_frame+1:
+                    ar1_cap.set(1,arena_frame)
+                ar1_ret, ar1_frame = ar1_cap.read()
+                ar1_frame = cv2.cvtColor(ar1_frame, cv2.COLOR_BGR2GRAY)
+                ar1_frame = cv2.resize(ar1_frame, (640, 480))
+
+                # Arena Frame 2
+                if arena_frame != p_arena_frame + 1:
+                    ar2_cap.set(1, arena_frame)
+                ar2_ret, ar2_frame = ar2_cap.read()
+                ar2_frame = cv2.cvtColor(ar2_frame, cv2.COLOR_BGR2GRAY)
+                ar2_frame = cv2.resize(ar2_frame, (640, 480))
+                p_arena_frame = arena_frame
+
+                # Left Eye Frame
+                if l_eye_frame != p_l_eye_frame + 1:
+                    le_cap.set(1, l_eye_frame)
+                le_ret, le_frame = le_cap.read()
+                le_frame = cv2.cvtColor(le_frame, cv2.COLOR_BGR2GRAY)
+                le_frame = cv2.resize(le_frame, (640, 480))
+                le_frame = cv2.flip(le_frame, 0)
+                p_l_eye_frame = l_eye_frame
+
+                # Right Eye Frame
+                if r_eye_frame != p_r_eye_frame + 1:
+                    re_cap.set(1, r_eye_frame)
+                re_ret, re_frame = re_cap.read()
+                re_frame = cv2.cvtColor(re_frame, cv2.COLOR_BGR2GRAY)
+                re_frame = cv2.resize(re_frame, (640, 480))
+                re_frame = cv2.flip(re_frame, 0)
+                p_r_eye_frame = r_eye_frame
+
+                eye_concat = np.hstack((le_frame, re_frame))
+                ar_concat = np.hstack((ar1_frame, ar2_frame))
+                vconcat = np.vstack((eye_concat, ar_concat))
+                if overlay_frame_numbers:
+                    framescounter = f'anchor={anchor}, R = {r_eye_frame} L= {l_eye_frame}, A = {arena_frame}'
+                    cv2.putText(vconcat, framescounter, (10, 450), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 255), 2, cv2.LINE_AA)
+                out.write(vconcat)
+                anchor += 1
+                print(f'writing video frame {anchor} out of {len(timeseries)} ', end='\r', flush=True)
+                if anchor > len(timeseries)-1:
+                    break
+        except Exception:
+            print(f'Encountered a problem with frame {anchor}, stopping concatenation')
+        finally:
+            ar1_cap.release()
+            ar2_cap.release()
+            le_cap.release()
+            re_cap.release()
+            out.release()
+            cv2.destroyAllWindows()
+            print('\n')
+            print('Process Finished')
