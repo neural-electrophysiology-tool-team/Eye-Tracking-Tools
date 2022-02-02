@@ -3,16 +3,18 @@ import math
 import os
 import subprocess as sp
 from pathlib import Path
+
 import cv2
 import numpy as np
 import pandas as pd
 import scipy.stats as stats
-from bokeh.plotting import figure, show
-from bokeh.palettes import Category20c
-from ellipse import LsqEllipse
-from tqdm import tqdm
-from scipy.signal import medfilt
 from bokeh.models import HoverTool
+from bokeh.palettes import Category20c
+from bokeh.plotting import figure, show
+from ellipse import LsqEllipse
+from scipy.signal import medfilt
+from tqdm import tqdm
+
 '''
 This script defines the BlockSync class which takes all of the relevant data for a given trial and can be utilized
 to produce a synchronized dataframe for all video sources to be used for further analysis
@@ -27,39 +29,47 @@ class BlockSync:
 
                                            /----> arena_videos  ->[config.yaml , info.yaml] videos -> [video files, output.log] timestamps -> [csv of timestamps]
 
-    Animal_x ->date(xx_xx_xxxx) -> block_x -----> eye_videos >> LE\RE -> video folder with name -> [video.h264 , video.mp4 , params.json , timestamps.csv]
+    Animal_call ->date(xx_xx_xxxx) -> block_x -----> eye_videos >> LE\RE -> video folder with name -> [video.h264 , video.mp4 , params.json , timestamps.csv]
 
                                            \----> oe_files >> date_time(xxxx_xx_xx_xx-xx-xx) --> [events.csv] internal open ephys structure from here (NWB format only!!!)
 
     """
 
-    def __init__(self, animal_num, experiment_date, block_num, path_to_animal_folder):
+    def __init__(self, animal_call, experiment_date, block_num, path_to_animal_folder):
         """
             defines the relevant block for analysis
 
             Parameters
             ----------
-            animal_num :  str
-                the number tag for the animal in the experiment
+            animal_call :  str
+                the name of the animal folder
 
             experiment_date :  str
-                the date of the experiment in DD_MM_YYYY format
+                the date of the experiment in DD_MM_YYYY format, if None - will assume no date paradigm
 
             block_num, :  str
                 block number to analyze
 
             path_to_animal_folder :  str
-                path to the folder where animal_{animal_num} is located
+                path to the folder where animal_call folder is located
 
         """
-        self.animal_num = animal_num
+        self.animal_call = animal_call
         self.experiment_date = experiment_date
         self.block_num = block_num
         self.path_to_animal_folder = path_to_animal_folder
-        self.block_path = Path(
-            rf'{self.path_to_animal_folder}Animal_{self.animal_num}\{self.experiment_date}\block_{self.block_num}')
+        if experiment_date is not None:
+            self.block_path = Path(
+                rf'{self.path_to_animal_folder}{self.animal_call}\{self.experiment_date}\block_{self.block_num}')
+        else:
+            self.block_path = Path(
+                rf'{self.path_to_animal_folder}{self.animal_call}\block_{self.block_num}')
         print(f'instantiated block number {self.block_num} at Path: {self.block_path}')
-        self.exp_date_time = os.listdir(fr'{self.block_path}\oe_files')[0]
+        try:
+            self.exp_date_time = os.listdir(fr'{self.block_path}\oe_files')[0]
+        except IndexError:
+            print(f'block number {self.block_num} does not have open_ephys files')
+
         self.arena_path = self.block_path / 'arena_videos'
         self.arena_files = None
         self.arena_videos = None
@@ -106,11 +116,11 @@ class BlockSync:
         self.saccade_dict = None
 
     def __str__(self):
-        return str(f'animal {self.animal_num}, block {self.block_num}, on {self.exp_date_time}')
+        return str(f'{self.animal_call}, block {self.block_num}, on {self.exp_date_time}')
 
     def __repr__(self):
         return str(
-            f'BlockSync object for animal {self.animal_num} with \n'
+            f'BlockSync object for animal {self.animal_call} with \n'
             f'block_num {self.block_num} at date {self.exp_date_time}')
 
     def handle_arena_files(self):
