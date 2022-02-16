@@ -1,17 +1,19 @@
 import glob
 import math
 import os
+import pathlib
 import subprocess as sp
-from pathlib import Path
 
 import cv2
 import numpy as np
+import open_ephys.analysis as OEA
 import pandas as pd
 import scipy.stats as stats
 from bokeh.models import HoverTool
 from bokeh.palettes import Category20c
 from bokeh.plotting import figure, show
 from ellipse import LsqEllipse
+from lxml import etree
 from scipy.signal import medfilt
 from tqdm import tqdm
 
@@ -20,18 +22,30 @@ This script defines the BlockSync class which takes all of the relevant data for
 to produce a synchronized dataframe for all video sources to be used for further analysis
 '''
 
+"""
+Algorithm:
+1. Make sure the following files are in existence:
+    1. Open ephys parsed events
+    2. an arbitrary anchor signal for the timeframe which includes all video sources + electrophysiology
+    3. 
+     
+"""
+
 
 class BlockSync:
     """
     This class designed to allow parsing and synchronization of the different files acquired in a given experimental
     block. The class expects a certain file system paradigm:
-     - Data will be arranged into block folders under animal folders, where each block contains the next structure:
-
-                                           /----> arena_videos  ->[config.yaml , info.yaml] videos -> [video files, output.log] timestamps -> [csv of timestamps]
-
-    Animal_call ->date(xx_xx_xxxx) -> block_x -----> eye_videos >> LE\RE -> video folder with name -> [video.h264 , video.mp4 , params.json , timestamps.csv]
-
-                                           \----> oe_files >> date_time(xxxx_xx_xx_xx-xx-xx) --> [events.csv] internal open ephys structure from here (NWB format only!!!)
+     - Data will be arranged into block folders under date folders under animal folders,
+     where each block contains the next structure:
+     Animal_call
+          ||
+          Date(dd_mm_yyyy) >> block_x
+                        ||
+                Arena_videos -> reptilearn output
+                eye_videos -> LE/RE -> video_folder -> video.h264 + .mp4, DLC analysis file.csv, timestamps.csv
+                oe_files ->  open ephys output
+                analysis -> empty
 
     """
 
@@ -59,11 +73,11 @@ class BlockSync:
         self.block_num = block_num
         self.path_to_animal_folder = path_to_animal_folder
         if experiment_date is not None:
-            self.block_path = Path(
-                rf'{self.path_to_animal_folder}{self.animal_call}\{self.experiment_date}\block_{self.block_num}')
+            self.block_path = pathlib.Path(
+                rf'{self.path_to_animal_folder}\{self.animal_call}\{self.experiment_date}\block_{self.block_num}')
         else:
-            self.block_path = Path(
-                rf'{self.path_to_animal_folder}{self.animal_call}\block_{self.block_num}')
+            self.block_path = pathlib.Path(
+                rf'{self.path_to_animal_folder}\{self.animal_call}\block_{self.block_num}')
         print(f'instantiated block number {self.block_num} at Path: {self.block_path}')
         try:
             self.exp_date_time = os.listdir(fr'{self.block_path}\oe_files')[0]
@@ -80,13 +94,26 @@ class BlockSync:
         self.arena_sync_df = None
         self.anchor_vid_name = None
         self.arena_frame_val_list = None
-        self.arena_brightness_df = None
+        if (self.block_path / 'analysis' / 'arena_brightness.csv').exists():
+            self.arena_brightness_df = pd.read_csv(self.block_path / 'analysis' / 'arena_brightness.csv')
+        else:
+            self.arena_brightness_df = None
         self.channeldict = {
             5: 'L_eye_TTL',
             6: 'Arena_TTL',
             7: 'Logical ON/OFF',
             8: 'R_eye_TTL'
         }
+        p = self.block_path / 'oe_files'
+        dirname = os.listdir(p)
+        self.oe_dirname = [i for i in dirname if (p / i).is_dir()][0]
+        p = self.block_path / 'oe_files' / self.oe_dirname
+        dirname = os.listdir(p)
+        self.rec_node_dirname = [i for i in dirname if (p / i).is_dir()][0]
+        self.oe_path = self.block_path / 'oe_files' / self.oe_dirname / self.rec_node_dirname
+        self.settings_xml = self.oe_path / 'settings.xml'
+        self.sample_rate = None
+        self.sample_rate = None
         self.oe_events = None
         self.oe_off_events = None
         self.ts_dict = None
@@ -114,6 +141,7 @@ class BlockSync:
         self.left_eye_pupil_speed = None
         self.right_eye_pupil_speed = None
         self.saccade_dict = None
+        self.first_oe_timestamp = None
 
     def __str__(self):
         return str(f'{self.animal_call}, block {self.block_num}, on {self.exp_date_time}')
@@ -122,6 +150,37 @@ class BlockSync:
         return str(
             f'BlockSync object for animal {self.animal_call} with \n'
             f'block_num {self.block_num} at date {self.exp_date_time}')
+
+    def get_sample_rate(self):
+        """
+        This is a utility function that gets the sample rate for the block through the settings.xml file under the
+        EDITOR branch of the xml
+        :return:
+        """
+        xml_tree = etree.parse(str(self.settings_xml))
+        xml_root = xml_tree.getroot()
+        for child in xml_root.iter():
+            if child.tag == 'EDITOR':
+                try:
+                    sample_rate = int(float(child.attrib['SampleRateString'][:4]) * 1000)
+                except KeyError:
+                    continue
+        self.sample_rate = sample_rate
+        print(f'The sample rate for block {self.block_num} is {sample_rate} Hz')
+
+    def oe_events_to_csv(self):
+        """
+        This function takes the open ephys events and puts them in a csv file
+        :return:
+        """
+        csv_export_path = self.block_path / 'oe_files' / self.oe_dirname / 'events.csv'
+        if not csv_export_path.is_file():
+            session = OEA.Session(str(self.oe_path))
+            events_df = session.recordings[0].events
+            events_df.to_csv(csv_export_path)
+            print(f'open ephys events exported to csv file at {csv_export_path}')
+        else:
+            print('events.csv file already exists')
 
     def handle_arena_files(self):
         """
@@ -154,7 +213,8 @@ class BlockSync:
         """
         eye_vid_path = self.block_path / 'eye_videos'
         print('converting videos...')
-        files_to_convert = glob.glob(str(eye_vid_path) + r'\**\*.h264', recursive=True)
+        files_to_convert = \
+            [file for file in glob.glob(str(eye_vid_path) + r'\**\*.h264', recursive=True) if 'DLC' not in file]
         converted_files = glob.glob(str(eye_vid_path) + r'\**\*.mp4', recursive=True)
         print(f'converting files: {files_to_convert}')
         if len(files_to_convert) == 0:
@@ -172,8 +232,10 @@ class BlockSync:
             else:
                 print(f'The file {file[:-5]}.mp4 already exists, no conversion necessary')
         print('Validating videos...')
-        videos_to_inspect = glob.glob(str(eye_vid_path) + r'\**\*.mp4', recursive=True)
-        timestamps_to_inspect = glob.glob(str(eye_vid_path) + r'\**\*.csv', recursive=True)
+        videos_to_inspect = \
+            [file for file in glob.glob(str(eye_vid_path) + r'\**\*.mp4', recursive=True) if 'DLC' not in file]
+        timestamps_to_inspect = \
+            [file for file in glob.glob(str(eye_vid_path) + r'\**\*.csv', recursive=True) if 'DLC' not in file]
         for vid in range(len(videos_to_inspect)):
             timestamps = pd.read_csv(timestamps_to_inspect[vid])
             num_reported = timestamps.shape[0]
@@ -189,8 +251,10 @@ class BlockSync:
             if stamp + '.mp4' not in str(vid):
                 print('stamping LE video')
                 os.rename(vid, fr'{vid[:-4]}_{stamp}{vid[-4:]}')
-        self.le_videos = glob.glob(str(self.block_path) + r'\eye_videos\LE\**\*.mp4')
-        self.re_videos = glob.glob(str(self.block_path) + r'\eye_videos\RE\**\*.mp4')
+        self.le_videos = [vid for vid in glob.glob(str(self.block_path) + r'\eye_videos\LE\**\*.mp4') if
+                          "DLC" not in vid]
+        self.re_videos = [vid for vid in glob.glob(str(self.block_path) + r'\eye_videos\RE\**\*.mp4') if
+                          "DLC" not in vid]
 
     @staticmethod
     def get_closest_frame(timestamp, vid_timeseries, report_acc=None):
@@ -333,7 +397,7 @@ class BlockSync:
     def create_arena_brightness_df(self, threshold_value, export=True):
         """
         This is a validation function for the previous synchronization steps and will produce
-        self.arena_brightness_df to plot a brightness trace and check synchronization
+        self.arena_brightness_df if not already available
 
         Parameters
         ----------
@@ -343,6 +407,9 @@ class BlockSync:
         export: binary
             if set to true, will export a dataframe to the analysis folder inside the block directory
         """
+        if self.arena_brightness_df is not None:
+            print('arena brightness df already exists')
+            return
         if self.arena_frame_val_list is None:
             self.arena_frame_val_list = BlockSync.produce_frame_val_list(self.arena_videos, threshold_value)
 
@@ -403,10 +470,10 @@ class BlockSync:
         timeseries = pd.Series(timeseries.values, index=index_range, name=channel)
         return timeseries
 
-
     @staticmethod
     def oe_events_parser(open_ephys_csv_path, channel_names, export_path=None):
         """
+
         :param open_ephys_csv_path: The path to an open ephys analysis tools exported csv (using TrialReporter.ipynb)
         :param channel_names: a dictionary of the form -
                         { 1 : 'channel name' (L_eye_camera)
@@ -422,8 +489,7 @@ class BlockSync:
 
         # Infer the active channels:
         df = pd.read_csv(open_ephys_csv_path)
-        channels = df['channel'].to_numpy(copy=True)
-        channels = np.unique(channels)
+        channels = np.unique(df['channel'].to_numpy(copy=True))
         df_onstate = df[df['state'] == 1]  # cut the df to represent only rising edges
         df_offstate = df[df['state'] == 0]  # This one is important for the ON/OFF signal of the arena
         list = []
@@ -441,14 +507,33 @@ class BlockSync:
                 open_ephys_events.to_csv(export_path)
         return open_ephys_events, open_ephys_off_events
 
-    def import_open_ephys_events(self):
+    def fix_timestamps(self):
         """
-        Method for importing the Open Ephys events.csv results of the OETrialReporter.ipynb mini-pipe
-        defines
+        This is a utility function which corrects the timestamps in the events.csv file
+        :return:
+        """
+        events_df = pd.read_csv(self.block_path / rf'oe_files\{self.exp_date_time}\events.csv')
+        s = pd.Series(((events_df['timestamp'].values - self.first_oe_timestamp) / self.sample_rate) * 1000)
+        events_df['timestamp'] = s
+        events_df.to_csv(self.block_path / rf'oe_files\{self.exp_date_time}\events.csv')
+
+    def parse_open_ephys_events(self, fix_timestamps=False):
+        """
+        Method for parsing the Open Ephys events.csv results
+
         This also defines the correct beginning and ending times of a block (in the OE reference frame)
 
         """
-        # first, parse the events of the open-ephys recording
+
+        # understand the samplerate and the first timestamp
+        if self.sample_rate is None:
+            self.get_sample_rate()
+        session = OEA.Session(str(self.oe_path))
+        self.first_oe_timestamp = session.recordings[0].continuous[0].timestamps[0]
+        # correct the timestamps
+        if fix_timestamps:
+            self.fix_timestamps()
+        # parse the events of the open-ephys recording
         self.oe_events, self.oe_off_events = BlockSync.oe_events_parser(
             self.block_path / rf'oe_files\{self.exp_date_time}\events.csv',
             self.channeldict,
@@ -459,15 +544,15 @@ class BlockSync:
             ts = pd.Series(data=BlockSync.get_frame_timeseries(self.oe_events, str(channel)), name=channel)
             self.ts_dict[f'{channel}'] = ts
             if channel == 'Arena_TTL':
-                ttl_breaks = np.where(np.diff(ts.values) > 0.5)
-
+                regular_interval = stats.mode(np.diff(ts.values))[0]
         # Now, determine which camera shot its first frame last to define the block start:
         if self.ts_dict['L_eye_TTL'][0] - self.ts_dict['R_eye_TTL'][0] > 0:
             last_to_start = 'L_eye_TTL'
         else:
             last_to_start = 'R_eye_TTL'
         # determine if the arena break in ttls happened before or after the last eye to start
-        ttl_breaks = np.where(np.diff(self.ts_dict['Arena_TTL'].values) > 0.5)
+        ttl_breaks = np.where(np.diff(self.ts_dict['Arena_TTL'].values) > regular_interval * 10)
+        print(ttl_breaks)
         arena_starts = self.ts_dict['Arena_TTL'][ttl_breaks[0][0]]
         if self.ts_dict[last_to_start][0] < arena_starts:
             self.block_starts = arena_starts
@@ -506,13 +591,18 @@ class BlockSync:
         else:
             return index_of_lowest_diff
 
-    def synchronize_block(self):
+    def synchronize_block(self, ms=True):
         """
         This method defines the synchronization dataframe for the block, where frames from the different video sources
         are aligned with an anchor signal spanning the synchronized experiment timeframe
         """
         # define the anchor signal
-        self.anchor_signal = np.arange(self.block_starts, self.block_ends, 1 / 60)
+        if ms:
+            self.anchor_signal = np.arange(self.block_starts, self.block_ends, 1000 / 60)
+            self.anchor_signal = self.anchor_signal[0:len(self.anchor_signal) - 60]
+        else:
+            self.anchor_signal = np.arange(self.block_starts, self.block_ends, 1 / 60)
+            self.anchor_signal = self.anchor_signal[0:len(self.anchor_signal)]
         # define the dataframe for the synchronized video frames output
         self.synced_videos = pd.DataFrame(data=None,
                                           index=range(len(self.anchor_signal)),
@@ -585,23 +675,13 @@ class BlockSync:
 
         self.eye_brightness_df = pd.DataFrame(index=self.anchor_signal)
         self.eye_brightness_df.insert(loc=0,
-                                      column=right_eye_col,
-                                      value=self.r_eye_values[self.synced_videos[f'{right_eye_col}'].values.astype(int)][
-                                            0:len(self.anchor_signal)])
+                                      column=right_eye_col, value=self.r_eye_values[self.synced_videos[
+                f'{right_eye_col}'].values.astype(int)][0:len(self.anchor_signal)])
+
         self.eye_brightness_df.insert(loc=0,
                                       column=left_eye_col,
                                       value=self.l_eye_values[self.synced_videos[f'{left_eye_col}'].values.astype(int)][
                                             0:len(self.anchor_signal)])
-
-        # self.arena_first_ttl_frame = self.synced_videos[arena_col][0]
-        # self.arena_brightness_col = pd.Series(index=range(len(self.anchor_signal)))
-        # for frame in range(len(self.anchor_signal)-1):
-        #     self.arena_brightness_col[frame] = self.arena_brightness_df[
-        #         f'{arena_vid}'][self.synced_videos[arena_col][frame] - self.arena_first_ttl_frame]
-        #
-        # self.eye_brightness_df.insert(loc=0,
-        #                               column=arena_col,
-        #                               value=self.arena_brightness_col.values)
 
     def validate_eye_synchronization(self, arena_vid_to_use=None):
         if self.eye_brightness_df is None:
@@ -674,7 +754,7 @@ class BlockSync:
                     print('That was not a valid number, try again...')
         else:
             arena_blink_ind = suspect_list[0]
-        search_range = range(arena_blink_ind-50, arena_blink_ind+50)
+        search_range = range(arena_blink_ind - 50, arena_blink_ind + 50)
         print(f'The suspect list is: {suspect_list}')
         print(f'the search range is {search_range}')
 
@@ -718,7 +798,7 @@ class BlockSync:
     def import_arena_brightness_file(self):
         self.arena_brightness_df = pd.read_csv(self.block_path / 'analysis/arena_brightness.csv',
                                                index_col=0)
-        #self.arena_brightness_df.drop(columns='Unnamed: 0')
+        # self.arena_brightness_df.drop(columns='Unnamed: 0')
         print(f'block {self.block_num} has imported the arena_brightness_df attribute')
         print('next command to run is import_open_ephys_events()')
 
@@ -1080,7 +1160,7 @@ class BlockSync:
                           plot_l_position=True,
                           plot_r_position=True,
                           smooth_velocities=False,
-                          sf = 3):
+                          sf=3):
         lx = self.le_video_sync_df.center_x.values
         ly = self.le_video_sync_df.center_y.values
         rx = self.re_video_sync_df.center_x.values
@@ -1161,12 +1241,18 @@ class BlockSync:
     def block_plot(self, plot_saccade_locs=False, saccade_frames_r=None, saccade_frames_l=None, plot_stim_on_off=False):
 
         # Extract the data columns and calculate Z-score across all blocks
-        le_ellipses_z = (self.le_video_sync_df.ellipse_size - self.le_video_sync_df.ellipse_size.mean()) / self.le_video_sync_df.ellipse_size.std()
-        re_ellipses_z = (self.re_video_sync_df.ellipse_size - self.re_video_sync_df.ellipse_size.mean()) / self.re_video_sync_df.ellipse_size.std()
-        le_x_zscores = (self.le_video_sync_df.center_x - np.mean(self.le_video_sync_df.center_x)) / self.le_video_sync_df.center_x.std()
-        le_y_zscores = (self.le_video_sync_df.center_y - np.mean(self.le_video_sync_df.center_y)) / self.le_video_sync_df.center_y.std()
-        re_x_zscores = (self.re_video_sync_df.center_x - np.mean(self.re_video_sync_df.center_x)) / self.re_video_sync_df.center_x.std()
-        re_y_zscores = (self.re_video_sync_df.center_y - np.mean(self.re_video_sync_df.center_y)) / self.re_video_sync_df.center_y.std()
+        le_ellipses_z = (
+                                    self.le_video_sync_df.ellipse_size - self.le_video_sync_df.ellipse_size.mean()) / self.le_video_sync_df.ellipse_size.std()
+        re_ellipses_z = (
+                                    self.re_video_sync_df.ellipse_size - self.re_video_sync_df.ellipse_size.mean()) / self.re_video_sync_df.ellipse_size.std()
+        le_x_zscores = (self.le_video_sync_df.center_x - np.mean(
+            self.le_video_sync_df.center_x)) / self.le_video_sync_df.center_x.std()
+        le_y_zscores = (self.le_video_sync_df.center_y - np.mean(
+            self.le_video_sync_df.center_y)) / self.le_video_sync_df.center_y.std()
+        re_x_zscores = (self.re_video_sync_df.center_x - np.mean(
+            self.re_video_sync_df.center_x)) / self.re_video_sync_df.center_x.std()
+        re_y_zscores = (self.re_video_sync_df.center_y - np.mean(
+            self.re_video_sync_df.center_y)) / self.re_video_sync_df.center_y.std()
         x_axis = range(len(le_ellipses_z))
         # plot everything
         bokeh_fig = figure(title=f'Pupil combined metrics block {self.block_num}',
@@ -1219,12 +1305,12 @@ class BlockSync:
             s_end = []
             state = 'start'
             if eye == 'l':
-                for i in range(len(l_saccades)-1):
+                for i in range(len(l_saccades) - 1):
                     if state == 'start':
                         s_start.append(l_saccades[i])
                         state = 'mid'
                         continue
-                    if l_saccades[i]+1 == l_saccades[i+1]:
+                    if l_saccades[i] + 1 == l_saccades[i + 1]:
                         s_mid.append(l_saccades[i])
                         state = 'mid'
                     else:
@@ -1233,12 +1319,12 @@ class BlockSync:
                 s_end.append(l_saccades[-1])
 
             if eye == 'r':
-                for i in range(len(r_saccades)-1):
+                for i in range(len(r_saccades) - 1):
                     if state == 'start':
                         s_start.append(r_saccades[i])
                         state = 'mid'
                         continue
-                    if r_saccades[i]+1 == r_saccades[i+1]:
+                    if r_saccades[i] + 1 == r_saccades[i + 1]:
                         s_mid.append(r_saccades[i])
                         state = 'mid'
                     else:
@@ -1250,7 +1336,7 @@ class BlockSync:
             s_dict[f'{eye}_ends'] = s_end
             if len(s_end) == len(s_start):
                 s_dict[f'{eye}_len'] = np.array(s_end) - np.array(s_start)
-            elif len(s_end) == len(s_start)+1:
+            elif len(s_end) == len(s_start) + 1:
                 if s_end[-2] == s_end[-1]:
                     s_end.pop(-1)
                     s_dict[f'{eye}_len'] = np.array(s_end) - np.array(s_start)
@@ -1266,7 +1352,7 @@ class BlockSync:
             s_dict[f'{eye}_y_loc'] = []
             s_dict[f'{eye}_x_loc'] = []
             for i in range(len(s_dict[f'{eye}_start'])):
-                x_axis = range(int(s_dict[f'{eye}_start'][i]-25), int(s_dict[f'{eye}_start'][i] + 25))
+                x_axis = range(int(s_dict[f'{eye}_start'][i] - 25), int(s_dict[f'{eye}_start'][i] + 25))
                 if eye == 'l':
                     y_data = self.le_video_sync_df.center_y[x_axis]
                     x_data = self.le_video_sync_df.center_x[x_axis]
@@ -1346,12 +1432,12 @@ class BlockSync:
             s_end = []
             state = 'start'
             if eye == 'l':
-                for i in range(len(l_saccades)-1):
+                for i in range(len(l_saccades) - 1):
                     if state == 'start':
                         s_start.append(l_saccades[i])
                         state = 'mid'
                         continue
-                    if l_saccades[i]+1 == l_saccades[i+1]:
+                    if l_saccades[i] + 1 == l_saccades[i + 1]:
                         s_mid.append(l_saccades[i])
                         state = 'mid'
                     else:
@@ -1360,12 +1446,12 @@ class BlockSync:
                 s_end.append(l_saccades[-1])
 
             if eye == 'r':
-                for i in range(len(r_saccades)-1):
+                for i in range(len(r_saccades) - 1):
                     if state == 'start':
                         s_start.append(r_saccades[i])
                         state = 'mid'
                         continue
-                    if r_saccades[i]+1 == r_saccades[i+1]:
+                    if r_saccades[i] + 1 == r_saccades[i + 1]:
                         s_mid.append(r_saccades[i])
                         state = 'mid'
                     else:
@@ -1377,7 +1463,7 @@ class BlockSync:
             s_dict[f'{eye}_ends'] = s_end
             if len(s_end) == len(s_start):
                 s_dict[f'{eye}_len'] = np.array(s_end) - np.array(s_start)
-            elif len(s_end) == len(s_start)+1:
+            elif len(s_end) == len(s_start) + 1:
                 if s_end[-2] == s_end[-1]:
                     s_end.pop(-1)
                     s_dict[f'{eye}_len'] = np.array(s_end) - np.array(s_start)
@@ -1398,7 +1484,7 @@ class BlockSync:
             s_dict[f'{eye}_x_loc'] = []
             for i in range(len(s_dict[f'{eye}_start'])):
                 try:
-                    x_axis = range(int(s_dict[f'{eye}_start'][i]-25), int(s_dict[f'{eye}_start'][i] + 25))
+                    x_axis = range(int(s_dict[f'{eye}_start'][i] - 25), int(s_dict[f'{eye}_start'][i] + 25))
                 except KeyError:
                     continue
                 if eye == 'l':
@@ -1454,7 +1540,8 @@ class BlockSync:
         self.saccade_dict = saccade_dict
 
         # create the saccade df and slowly fill it up
-        saccade_df = pd.DataFrame(data=None, columns=['starts', 'ends', 'magnitude', 'velocity', 'head_movements', 'r_dynamics'])
+        saccade_df = pd.DataFrame(data=None,
+                                  columns=['starts', 'ends', 'magnitude', 'velocity', 'head_movements', 'r_dynamics'])
         saccade_list = []
         for eye in ['r', 'l']:
             for row in range(len(s_dict[f'{eye}_start'])):
@@ -1475,7 +1562,8 @@ class BlockSync:
 
         self.saccade_list = saccade_list
 
-    def create_synced_video(self, filename, r_eye_vid, l_eye_vid, arena_vid1, arena_vid2, start_time, end_time, frmt='H264', overlay_frame_numbers = False):
+    def create_synced_video(self, filename, r_eye_vid, l_eye_vid, arena_vid1, arena_vid2, start_time, end_time,
+                            frmt='H264', overlay_frame_numbers=False):
         """
         This function takes as input the names of 4 videos and concatenates them into a unified video
         The block has to be correctly synchronized in order to produce the video
@@ -1502,7 +1590,7 @@ class BlockSync:
         p_r_eye_frame = int(timeseries.iloc[1]['R_eye_TTL'])
         anchor = 0
         fourcc = cv2.VideoWriter_fourcc(*frmt)
-        out = cv2.VideoWriter(str(self.block_path / str(filename + '.mp4')), fourcc, 60.0, (640*2, 480*2))
+        out = cv2.VideoWriter(str(self.block_path / str(filename + '.mp4')), fourcc, 60.0, (640 * 2, 480 * 2))
         try:
             while ar1_cap.isOpened():
                 arena_frame = int(timeseries.iloc[anchor]['Arena_TTL'])
@@ -1510,8 +1598,8 @@ class BlockSync:
                 l_eye_frame = int(timeseries.iloc[anchor]['L_eye_TTL'])
 
                 # Arena Frame 1
-                if arena_frame != p_arena_frame+1:
-                    ar1_cap.set(1,arena_frame)
+                if arena_frame != p_arena_frame + 1:
+                    ar1_cap.set(1, arena_frame)
                 ar1_ret, ar1_frame = ar1_cap.read()
                 ar1_frame = cv2.cvtColor(ar1_frame, cv2.COLOR_BGR2GRAY)
                 ar1_frame = cv2.resize(ar1_frame, (640, 480))
@@ -1547,11 +1635,12 @@ class BlockSync:
                 vconcat = np.vstack((eye_concat, ar_concat))
                 if overlay_frame_numbers:
                     framescounter = f'anchor={anchor}, R = {r_eye_frame} L= {l_eye_frame}, A = {arena_frame}'
-                    cv2.putText(vconcat, framescounter, (10, 450), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 255), 2, cv2.LINE_AA)
+                    cv2.putText(vconcat, framescounter, (10, 450), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 255), 2,
+                                cv2.LINE_AA)
                 out.write(vconcat)
                 anchor += 1
                 print(f'writing video frame {anchor} out of {len(timeseries)} ', end='\r', flush=True)
-                if anchor > len(timeseries)-1:
+                if anchor > len(timeseries) - 1:
                     break
         except Exception:
             print(f'Encountered a problem with frame {anchor}, stopping concatenation')
