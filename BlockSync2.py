@@ -8,9 +8,13 @@ import open_ephys.analysis as OEA
 import pandas as pd
 import scipy.stats as stats
 from lxml import etree
+from bokeh.io import output as b_output
 from bokeh.plotting import figure, show
+from bokeh.models import HoverTool
 from ellipse import LsqEllipse
 from tqdm import tqdm
+import math
+import re
 
 '''
 This script defines the BlockSync class which takes all of the relevant data for a given trial and can be utilized
@@ -130,14 +134,18 @@ class BlockSync:
         self.re_csv = None
         self.le_ellipses = None
         self.re_ellipses = None
-        self.arena_bdf = None
         self.euclidean_speed_per_frame = None
         self.movement_df = None
         self.no_movement_frames = None
         self.left_eye_pupil_speed = None
         self.right_eye_pupil_speed = None
         self.saccade_dict = None
-        self.first_oe_timestamp = None
+        #self.first_oe_timestamp = None
+        self.eye_diff_list = None
+        self.fixed_eye_brightness_df = None
+        self.le_df = None
+        self.re_df = None
+        self.lag_direction = None
 
     def __str__(self):
         return str(f'{self.animal_call}, block {self.block_num}, on {self.exp_date_time}')
@@ -154,19 +162,52 @@ class BlockSync:
         :return:
         """
         sample_rate = None
-        xml_tree = etree.parse(str(self.settings_xml))
-        xml_root = xml_tree.getroot()
-        for child in xml_root.iter():
-            if child.tag == 'EDITOR':
-                try:
-                    sample_rate = int(float(child.attrib['SampleRateString'][:4]) * 1000)
-                except KeyError:
-                    continue
+        try:
+            xml_tree = etree.parse(str(self.settings_xml))
+            xml_root = xml_tree.getroot()
+            for child in xml_root.iter():
+                if child.tag == 'EDITOR':
+                    try:
+                        sample_rate = int(float(child.attrib['SampleRateString'][:4]) * 1000)
+                    except KeyError:
+                        continue
+            if sample_rate is not None:
+                print(f'Found the sample rate for block {self.block_num} in the xml file, it is {sample_rate} Hz')
+            else:
+                print(f'could not find the sample rate for block_{self.block_num} in the xml file, '
+                      f'looking for it in the first recording...')
+                sample_rate = self.get_sample_rate_cont()
+        except OSError:
+            print('could not find the sample rate in the xml file due to error, will '
+                  'look in the cont file of the first recording...')
+            sample_rate = self.get_sample_rate_cont()
+
+        finally:
+            if sample_rate is not None:
+                return sample_rate
+            else:
+                print('faild to find the sample, rate - please enter it manually')
+                sample_rate = input('sample_rate = ?')
+                return sample_rate
+
+    def get_sample_rate_cont(self):
+        file_name = sorted([i for i in os.listdir(self.oe_path) if '.continuous' in i])[0]
+        file_path = self.oe_path / file_name
+        f = open(file_path, 'rb')
+        b = f.readlines(1024)
+        sample_rate = None
+        for i in b:
+            if 'sampleRate' in str(i):
+                # print(str(i)[9])
+                start_position = str(i).find('=') + 2
+                sample_rate = int((str(i)[start_position:-4]))
+        f.close()
         if sample_rate is not None:
-            print(f'The sample rate for block {self.block_num} is {sample_rate} Hz')
+            print(f'found the sample rate, it is {sample_rate}')
+            return sample_rate
         else:
-            print(f'could not find the sample rate for block_{self.block_num}')
-        return sample_rate
+            print('could not find the sample rate')
+            return None
 
     def oe_events_to_csv(self):
         """
@@ -193,6 +234,7 @@ class BlockSync:
         self.arena_timestamps : list
             list of .csv files associated with
         """
+        print('handling arena files')
         self.arena_files = [x for x in self.arena_path.iterdir()]
         # fix names
         for i in self.arena_files:
@@ -211,6 +253,7 @@ class BlockSync:
         """
         This method converts and renames the eye tracking videos in the files tree into workable .mp4 files
         """
+        print('handling eye video files')
         eye_vid_path = self.block_path / 'eye_videos'
         print('converting videos...')
         files_to_convert = \
@@ -288,7 +331,10 @@ class BlockSync:
                 diff_series = np.diff(s)
                 diff_mode = stats.mode(diff_series)[0][0]
                 arena_start_stop = np.where(diff_series > 10 * diff_mode)[0]
-                print(arena_start_stop)
+                print(f'the arena TTLs are signaling start and stop positions at {arena_start_stop}')
+                if len(arena_start_stop) != 2:
+                    print(f'there is some kind of problem because there should be 2 breaks in the arena TTLs '
+                          f'and there are {len(arena_start_stop)}')
                 arena_start_timestamp = s.iloc[arena_start_stop[0] + 1]
                 print(f'arena first frame timestamp: {arena_start_timestamp}')
                 arena_end_timestamp = s.iloc[arena_start_stop[1]]
@@ -329,13 +375,14 @@ class BlockSync:
         finds the first and last frame timestamps for each video source
 
         """
+        print('running parse_open_ephys_events...')
         # First, create the events.csv file:
         self.oe_events_to_csv()
         # understand the samplerate and the first timestamp
         # if self.sample_rate is None:
         #     self.get_sample_rate()
         session = OEA.Session(str(self.oe_path))
-        self.first_oe_timestamp = session.recordings[0].continuous[0].timestamps[0]
+        #self.first_oe_timestamp = session.recordings[0].continuous[0].timestamps[0]
         # parse the events of the open-ephys recording
 
         ex_path = self.block_path / rf'oe_files\{self.exp_date_time}\parsed_events.csv'
@@ -371,15 +418,23 @@ class BlockSync:
         else:
             return index_of_lowest_diff
 
-    def synchronize_block(self):
+    def synchronize_block(self, export=True):
         """
         This method builds a synced_videos dataframe
         1. The arena video is used as anchor
         2. The different anchor timestamps are aligned with the closest frames of the other sources
         """
+        # check if there is an exported version of the blocksync_df:
+        if pathlib.Path(self.analysis_path / 'blocksync_df.csv').exists():
+            self.blocksync_df = pd.read_csv(pathlib.Path(self.analysis_path / 'blocksync_df.csv'))
+            print('blocksync_df loaded from analysis folder')
+            return self.blocksync_df
+        else:
+            print('creating blocksync_df')
         # define block_starts + block_ends
         start_time = max([self.arena_vid_first_t, self.r_vid_first_t, self.l_vid_first_t])
         end_time = min([self.arena_vid_last_t, self.r_vid_last_t, self.l_vid_last_t])
+
         # create a loop that goes over the series of arena timestamps between start and end of block:
         arena_tf = self.oe_events.query('@start_time < Arena_TTL < @end_time')[['Arena_TTL', 'Arena_TTL_frame']]
         r_eye_tf = self.oe_events.query('@start_time < Arena_TTL < @end_time or Arena_TTL != Arena_TTL')[
@@ -391,11 +446,15 @@ class BlockSync:
         # create a dataframe for the synchronization
         self.blocksync_df = pd.DataFrame(columns=['Arena_frame', 'L_eye_frame', 'R_eye_frame'],
                                          index=arena_tf.Arena_TTL)
-        for i, t in enumerate(arena_tf.Arena_TTL):
+        for i, t in enumerate(tqdm(arena_tf.Arena_TTL)):
             arena_frame = arena_tf.Arena_TTL_frame.iloc[i]
             l_eye_frame = l_eye_tf['L_eye_TTL_frame'].iloc[self.get_closest_frame(t, l_eye_tf['L_eye_TTL'])]
             r_eye_frame = r_eye_tf['R_eye_TTL_frame'].iloc[self.get_closest_frame(t, r_eye_tf['R_eye_TTL'])]
             self.blocksync_df.loc[t] = [arena_frame, l_eye_frame, r_eye_frame]
+        print('created blocksync_df')
+        if export:
+            self.blocksync_df.to_csv(self.analysis_path / 'blocksync_df.csv')
+            print(f'exported blocksync_df to {self.analysis_path}/ blocksync_df.csv')
 
     def produce_drift_report(self):
         """
@@ -497,12 +556,18 @@ class BlockSync:
 
         return frame_val_list
 
-    def synchronize_arena_timestamps(self, return_dfs=False, export_sync_df=False, get_only_anchor_vid=False):
+    def synchronize_arena_timestamps(self, return_dfs=False, export_sync_df=True, get_only_anchor_vid=False):
         """
         This function reads the different arena timestamps files, chooses the longest as an anchor and fits
         frames corresponding with the closest timestamp to the anchor.
         It creates self.arena_sync_df and self.anchor_vid_name
         """
+        if (self.analysis_path / 'arena_synchronization.csv').exists():
+            print('arena_sync_df already exists, loading from file...')
+            self.arena_sync_df = pd.read_csv(self.analysis_path / 'arena_synchronization.csv')
+            if 'Unnamed: 0' in self.arena_sync_df.columns:
+                self.arena_sync_df = self.arena_sync_df.drop(axis=1, labels='Unnamed: 0')
+            return
         # read the timestamp files
         len_list = []
         df_list = []
@@ -519,29 +584,36 @@ class BlockSync:
 
         if get_only_anchor_vid:
             return
-        # construct a synchronization dataframe
-        self.arena_sync_df = pd.DataFrame(data=[],
-                                          columns=self.arena_vidnames,
-                                          index=range(len(anchor_vid)))
 
-        # populate the df, starting with the anchor:
-        self.arena_sync_df[self.arena_sync_df.columns[anchor_ind]] = range(len(anchor_vid))
-        vids_to_sync = list(self.arena_sync_df.drop(axis=1, labels=self.anchor_vid_name).columns)  # CHECK ME !!!!
-        anchor_df = df_list.pop(anchor_ind)
-        df_to_sync = df_list
-        # iterate over rows and videos to find the corresponding frames
-        print('Synchronizing the different arena videos')
-        for row in tqdm(self.arena_sync_df.index):
-            anchor = anchor_vid.timestamp[row]
-            for vid in range(len(df_to_sync)):
-                frame_num = self.get_closest_frame(anchor, df_to_sync[vid])
-                self.arena_sync_df.loc[row, vids_to_sync[vid]] = frame_num
-        print(f'The anchor video used was "{self.anchor_vid_name}"')
+        # now, check if the arena_synchronization df is already calculated:
+        if pathlib.Path(self.analysis_path / 'arena_synchronization.csv').exists():
+            print('arena_synchronization.csv was already created, loading it...')
+            self.arena_sync_df = pd.read_csv(pathlib.Path(self.analysis_path / 'arena_synchronization.csv'))
+        else:
+            # construct a synchronization dataframe
+            self.arena_sync_df = pd.DataFrame(data=[],
+                                              columns=self.arena_vidnames,
+                                              index=range(len(anchor_vid)))
+
+            # populate the df, starting with the anchor:
+            self.arena_sync_df[self.arena_sync_df.columns[anchor_ind]] = range(len(anchor_vid))
+            vids_to_sync = list(self.arena_sync_df.drop(axis=1, labels=self.anchor_vid_name).columns)  # CHECK ME !!!!
+            anchor_df = df_list.pop(anchor_ind)
+            df_to_sync = df_list
+            # iterate over rows and videos to find the corresponding frames
+            print('Synchronizing the different arena videos')
+            for row in tqdm(self.arena_sync_df.index):
+                anchor = anchor_vid.timestamp[row]
+                for vid in range(len(df_to_sync)):
+                    frame_num = self.get_closest_frame(anchor, df_to_sync[vid])
+                    self.arena_sync_df.loc[row, vids_to_sync[vid]] = frame_num
+            print(f'The anchor video used was "{self.anchor_vid_name}"')
 
         if return_dfs:
             return self.arena_sync_df, self.anchor_vid_name
         if export_sync_df:
-            self.arena_sync_df.to_csv(self.block_path / 'arena_synchronization.csv')
+            self.arena_sync_df.to_csv(self.analysis_path / 'arena_synchronization.csv')
+            print(f'created arena_synchronization.csv in the block analysis folder')
 
     def create_arena_brightness_df(self, threshold_value, export=True):
         """
@@ -559,6 +631,7 @@ class BlockSync:
         if self.arena_brightness_df is not None:
             print('arena brightness df already exists')
             return
+
         elif self.arena_sync_df is None:
             print('no arena synchronization step performed - running it now...')
             self.synchronize_arena_timestamps()
@@ -577,11 +650,14 @@ class BlockSync:
         if export:
             self.arena_brightness_df.to_csv(self.block_path / 'analysis' / 'arena_brightness.csv')
 
-    def validate_arena_synchronization(self):
+    def validate_arena_synchronization(self,drop=None):
         if self.arena_brightness_df is None:
             print('No arena_brightness_df, run the create_arena_brightness_df method')
         x_axis = self.arena_brightness_df.index.values
-        columns = self.arena_brightness_df.columns
+        if drop is not None:
+            columns = [c for c in self.arena_brightness_df.columns if drop not in c]
+        else:
+            columns = self.arena_brightness_df.columns
         bokeh_fig = figure(title=f'Block Number {self.block_num} Arena Video Synchronization Verify',
                            x_axis_label='Frame',
                            y_axis_label='Z_Score',
@@ -599,9 +675,17 @@ class BlockSync:
     def create_eye_brightness_df(self, threshold_value=30, export=True):
         """
         This method creates the l/r_eye_values lists, which represent the illumination level of eye video frames
+        :param export: if true will export the df to csv
         :param threshold_value: The threshold value to use as mask before calculating brightness
         :return:
         """
+
+        # first, check if the analysis folder contains the eye brightnes df:
+        if pathlib.Path(self.analysis_path / 'eye_brightness_df.csv').exists():
+            self.eye_brightness_df = pd.read_csv(pathlib.Path(self.analysis_path / 'eye_brightness_df.csv'))
+            print('eye_brightness_df loaded from analysis folder')
+            return self.eye_brightness_df
+
         if self.eye_brightness_df is None:
             if self.le_frame_val_list is None:
                 self.le_frame_val_list = self.produce_frame_val_list(self.le_videos, threshold_value)
@@ -630,3 +714,281 @@ class BlockSync:
                 print(rf'creating {self.analysis_path}/eye_brightness_df.csv')
         else:
             print('eye_brightness_df already exists')
+
+    @staticmethod
+    def blink_rising_edges_detector(b_series, f_series, threshold):
+        """
+        This function finds the rising edge of each blinking event in a list of frames' brightness values
+        :param b_series: value of one brightness column from the eye_brightness_df object
+        :param f_series: the frame numbers for the b_series (should be taken from the same DataFrame)
+        :return: a list of indexes along the series which correspond with rising edges immediately after blinking events
+        """
+        # create the b_series object with indexes from the synchronized dataframe:
+        b_series = pd.Series(data=b_series, index=f_series)
+        # find events where the threshold is crossed and return their indexes:
+        blink_indexes = b_series[b_series < threshold].index
+        # now reduce them to the first index in each cluster:
+        rising_edges = []
+        for i, f in enumerate(blink_indexes):
+            try:
+                if f + 1 == blink_indexes[i + 1]:
+                    # print(f'{f} is before {blink_indexes[i+1]} so I continue')
+                    continue
+                else:
+                    rising_edges.append(f + 1)
+                    # print(f'found a rising edge on frame {f+1} with a brightness value of {b_series[f+1]}')
+            except IndexError:
+                print(f'index error on position {i} out of {len(blink_indexes)}')
+        return rising_edges
+
+    @staticmethod
+    def find_min_dist(n, ls):
+        """
+        finds the organ from l with the minimal absolute distance to n
+        :param n: number
+        :param ls: list of numbers
+        :return: the number from l which has the smallest absolute distance to n
+        """
+        n_arr = np.array([n] * len(ls))
+        ls = np.array(ls)
+        diff_arr = n_arr - ls
+        lowest_dist_ind = np.argmin(abs(diff_arr))
+        return ls[lowest_dist_ind]
+
+    def get_eyes_diff_list(self, threshold):
+        r_rising = self.blink_rising_edges_detector(self.eye_brightness_df['R_values'].values,
+                                                    self.eye_brightness_df['R_eye_frame'], threshold=threshold)
+        l_rising = self.blink_rising_edges_detector(self.eye_brightness_df['L_values'].values,
+                                                    self.eye_brightness_df['L_eye_frame'], threshold=threshold)
+        rising_d = {
+            'right': r_rising,
+            'left': l_rising
+        }
+        if len(rising_d['right']) > len(rising_d['left']):
+            k_shorter = 'left'
+            k_longer = 'right'
+        else:
+            k_shorter = 'right'
+            k_longer = 'left'
+
+        sub_list = []
+        for n in rising_d[k_shorter]:
+            sub_list.append(self.find_min_dist(n, rising_d[k_longer]))
+
+        self.eye_diff_list = rising_d[k_shorter] - np.array(sub_list)
+        self.eye_diff_mode = stats.mode(self.eye_diff_list)[0][0]
+
+        # determine lag directionality
+        if k_shorter == 'right':
+            if self.eye_diff_mode < 0:
+                self.lag_direction = ['right', 'early']
+            else:
+                self.lag_direction = ['right', 'late']
+        else:
+            if self.eye_diff_mode < 0:
+                self.lag_direction = ['left', 'early']
+            else:
+                self.lag_direction = ['left', 'late']
+        print(f'The suspected lag between eye cameras is {self.eye_diff_mode} with the direction {self.lag_direction}')
+
+    def fix_eye_synchronization(self):
+
+        df = self.eye_brightness_df
+        if self.lag_direction[0] == 'right':
+            to_shift = df[['R_eye_frame', 'R_values']].copy()
+            df.loc[:, ['R_eye_frame', 'R_values']] = to_shift.shift(periods=-int(self.eye_diff_mode))
+        else:
+            to_shift = df[['L_eye_frame', 'L_values']].copy()
+            df.loc[:, ['L_eye_frame', 'L_values']] = to_shift.shift(periods=-int(self.eye_diff_mode))
+        self.fixed_eye_brightness_df = df
+        print('created fixed_eye_brightness_df attribute for the block')
+
+    def move_eye_sync_manual(self, cols_to_move, step):
+
+        df = self.fixed_eye_brightness_df
+        to_shift = df[cols_to_move].copy()
+        df.loc[:, cols_to_move] = to_shift.shift(periods=step)
+        self.manual_sync_df = df
+
+    def get_blink_frames_manual(self, threshold=-35):
+
+        """This is a utility function which detects rising edges for manual synchronization of eyes and arena"""
+        r_rising = self.blink_rising_edges_detector(self.fixed_eye_brightness_df['R_values'].values,
+                                                    self.fixed_eye_brightness_df['R_eye_frame'], threshold=threshold)
+        l_rising = self.blink_rising_edges_detector(self.fixed_eye_brightness_df['L_values'].values,
+                                                    self.fixed_eye_brightness_df['L_eye_frame'], threshold=threshold)
+        dict_rising = {'left': l_rising,
+                       'right': r_rising}
+        return dict_rising
+
+    def import_manual_sync_df(self):
+        try:
+            self.manual_sync_df = pd.read_csv(self.analysis_path / 'manual_sync_df.csv')
+            if 'Unnamed: 0' in self.manual_sync_df.columns:
+                self.final_sync_df = self.manual_sync_df.drop(axis=1, labels='Unnamed: 0')
+            else:
+                self.final_sync_df = self.manual_sync_df
+        except FileNotFoundError:
+            print('there is no manual sync file')
+
+    @staticmethod
+    def eye_tracking_analysis(dlc_video_analysis_csv, uncertainty_thr):
+        """
+        :param dlc_video_analysis_csv: the csv output of a dlc analysis of one video, already read by pandas with header=1
+        :param uncertainty_thr: The confidence P value to use as a threshold for datapoint validity in the analysis
+        :returns ellipse_df: a DataFrame of ellipses parameters (center, width, height, phi, size) for each video frame
+
+        """
+        # import the dataframe and convert it to floats
+        data = dlc_video_analysis_csv
+        data = data.iloc[1:].apply(pd.to_numeric)
+        # sort the pupil elements to x and y, with p as probability
+        pupil_elements = np.array([x for x in data.columns if 'Pupil' in x])
+        pupil_xs = data[pupil_elements[np.arange(0, len(pupil_elements), 3)]]
+        pupil_ys = data[pupil_elements[np.arange(1, len(pupil_elements), 3)]]
+        pupil_ps = data[pupil_elements[np.arange(2, len(pupil_elements), 3)]]
+        # rename dataframes for masking with p values of bad points:
+        pupil_ps = pupil_ps.rename(columns=dict(zip(pupil_ps.columns, pupil_xs.columns)))
+        pupil_ys = pupil_ys.rename(columns=dict(zip(pupil_ys.columns, pupil_xs.columns)))
+        good_points = pupil_ps > uncertainty_thr
+        pupil_xs = pupil_xs[good_points]
+        pupil_ys = pupil_ys[good_points]
+        # Do the same for the edges
+        # edge_elements = [x for x in data.columns if 'edge' in x]
+        # edge_xs = data[edge_elements[np.arange(0,len(edge_elements),3)]]
+        # edge_ys = data[edge_elements[np.arange(1,len(edge_elements),3)]]
+        # edge_ps = data[edge_elements[np.arange(2,len(edge_elements),3)]]
+        # edge_ps = edge_ps.rename(columns=dict(zip(edge_ps.columns,edge_xs.columns)))
+        # edge_ys = edge_ys.rename(columns=dict(zip(edge_ys.columns,edge_xs.columns)))
+        # e = edge_ps < uncertainty_thr
+
+        # work row by row to figure out the ellipses
+        ellipses = []
+        caudal_edge_ls = []
+        rostral_edge_ls = []
+        for row in tqdm(range(1, len(data) - 1)):
+            # first, take all of the values, and concatenate them into an X array
+            x_values = pupil_xs.loc[row].values
+            y_values = pupil_ys.loc[row].values
+            X = np.c_[x_values, y_values]
+            # now, remove nan values, and check if there are enough points to make the ellipse
+            X = X[~ np.isnan(X).any(axis=1)]
+            # if there are enough rows for a fit, make an ellipse
+            if X.shape[0] > 5:
+                el = LsqEllipse().fit(X)
+                center, width, height, phi = el.as_parameters()
+                center_x = center[0]
+                center_y = center[1]
+                ellipses.append([center_x, center_y, width, height, phi])
+            else:
+                ellipses.append([np.nan, np.nan, np.nan, np.nan, np.nan])
+            # caudal_edge = [
+            #     float(data['Caudal_edge'][row]),
+            #     float(data['Caudal_edge.1'][row])
+            # ]
+            # rostral_edge = [
+            #     float(data['Rostral_edge'][row]),
+            #     float(data['Rostral_edge.1'][row])
+            # ]
+            # caudal_edge_ls.append(caudal_edge)
+            # rostral_edge_ls.append(rostral_edge)
+            # if row % 50 == 0:
+            #   print(f'just finished with {row} out of {len(data)-1}', end='\r',flush=True)
+        ellipse_df = pd.DataFrame(columns=['center_x', 'center_y', 'width', 'height', 'phi'], data=ellipses)
+        a = np.array(ellipse_df['height'][:])
+        b = np.array(ellipse_df['width'][:])
+        ellipse_size_per_frame = a * b * math.pi
+        ellipse_df['ellipse_size'] = ellipse_size_per_frame
+        # ellipse_df['rostral_edge'] = rostral_edge_ls
+        # ellipse_df['caudal_edge'] = caudal_edge_ls
+        print('\n Done')
+        return ellipse_df
+
+    def read_dlc_data(self, threshold_to_use=0.999, export=True):
+        """
+        Method to read and analyze the dlc files and fit ellipses to create the le/re ellipses attributes of the block
+        """
+        if (self.analysis_path / 're_df.csv').exists() and (self.analysis_path / 'le_df.csv').exists():
+            self.re_df = pd.read_csv(self.analysis_path / 're_df.csv')
+            self.le_df = pd.read_csv(self.analysis_path / 'le_df.csv')
+            print('eye dataframes loaded from analysis folder')
+            return
+
+        pl = [i for i in os.listdir(self.l_e_path) if 'DLC' in i and '.csv' in i][0]
+        self.le_csv = pd.read_csv(self.l_e_path / pl, header=1)
+        pr = [i for i in os.listdir(self.r_e_path) if 'DLC' in i and '.csv' in i][0]
+        self.re_csv = pd.read_csv(self.r_e_path / pr, header=1)
+        self.le_ellipses = self.eye_tracking_analysis(self.le_csv, threshold_to_use)
+        self.re_ellipses = self.eye_tracking_analysis(self.re_csv, threshold_to_use)
+
+        self.le_df = self.final_sync_df.drop(labels=['Arena_frame', 'R_eye_frame'], axis=1)
+        for column in list(self.le_ellipses.columns):
+            self.le_df.insert(loc=len(self.le_df.columns), column=column, value=None)
+        self.re_df = self.final_sync_df.drop(labels=['Arena_frame', 'L_eye_frame'], axis=1)
+        for column in list(self.re_ellipses.columns):
+            self.re_df.insert(loc=len(self.re_df.columns), column=column, value=None)
+        print('populating le_df')
+        for row in tqdm(self.le_df.index):
+            try:
+                frame = self.le_df['L_eye_frame'].loc[row]
+                if frame == frame:
+                    frame = int(frame)
+                    self.le_df.loc[row, 'center_x'] = self.le_ellipses.iloc[frame]['center_x']
+                    self.le_df.loc[row, 'center_y'] = self.le_ellipses.iloc[frame]['center_y']
+                    self.le_df.loc[row, 'width'] = self.le_ellipses.width[frame]
+                    self.le_df.loc[row, 'height'] = self.le_ellipses.height[frame]
+                    self.le_df.loc[row, 'phi'] = self.le_ellipses.phi[frame]
+                    self.le_df.loc[row, 'ellipse_size'] = self.le_ellipses.ellipse_size[frame]
+            except IndexError:
+                print(f'Tried to match frame {row} but there is no frame with this index')
+                continue
+            # le_df.at[row, 'rostral_edge'] = le_ellipses.rostral_edge[frame]
+            # le_df.at[row, 'caudal_edge'] = le_ellipses.caudal_edge[frame]
+        print('populating re_video_sync_df')
+        for row in tqdm(self.re_df.index):
+            try:
+                frame = self.re_df['R_eye_frame'].loc[row]
+                if frame == frame:
+                    frame = int(frame)
+                    self.re_df.loc[row, 'center_x'] = self.re_ellipses.iloc[frame]['center_x']
+                    self.re_df.loc[row, 'center_y'] = self.re_ellipses.iloc[frame]['center_y']
+                    self.re_df.loc[row, 'width'] = self.re_ellipses.width[frame]
+                    self.re_df.loc[row, 'height'] = self.re_ellipses.height[frame]
+                    self.re_df.loc[row, 'phi'] = self.re_ellipses.phi[frame]
+                    self.re_df.loc[row, 'ellipse_size'] = self.re_ellipses.ellipse_size[frame]
+            except IndexError:
+                print(f'Tried to match frame {frame} but there is no frame with this index')
+                continue
+            # re_video_sync_df.at[row, 'rostral_edge'] = re_ellipses.rostral_edge[frame]
+            # re_video_sync_df.at[row, 'caudal_edge'] = re_ellipses.caudal_edge[frame]
+        print('done')
+        if export:
+            print('exporting to analysis folder')
+            self.re_df.to_csv(self.analysis_path / 're_df.csv')
+            self.le_df.to_csv(self.analysis_path / 'le_df.csv')
+
+    def block_eye_plot(self, export=False):
+        # normalize values:
+        le_el_z = (self.le_df.ellipse_size - self.le_df.ellipse_size.mean()) / self.le_df.ellipse_size.std()
+        le_x_z = (self.le_df.center_x - np.mean(self.le_df.center_x)) / self.le_df.center_x.std()
+        le_y_z = (self.le_df.center_y - np.mean(self.le_df.center_y)) / self.le_df.center_y.std()
+        re_el_z = (self.re_df.ellipse_size - self.re_df.ellipse_size.mean()) / self.re_df.ellipse_size.std()
+        re_x_z = (self.re_df.center_x - np.mean(self.re_df.center_x)) / self.re_df.center_x.std()
+        re_y_z = (self.re_df.center_y - np.mean(self.re_df.center_y)) / self.re_df.center_y.std()
+        x_axis = self.final_sync_df['Arena_TTL'].values
+        b_fig = figure(title=f'Pupil combined metrics block {self.block_num}',
+                       x_axis_label='OE Timestamps',
+                       y_axis_label='Z score',
+                       plot_width=1500,
+                       plot_height=700)
+        b_fig.add_tools(HoverTool())
+        b_fig.line(x_axis, le_el_z+7, legend_label='Left Eye Diameter', line_width=1.5, line_color='blue')
+        b_fig.line(x_axis, le_x_z+14, legend_label='Left Eye X Position', line_width=1, line_color='cyan')
+        b_fig.line(x_axis, le_y_z, legend_label='Left Eye Y position', line_width=1, line_color='green')
+        b_fig.line(x_axis, re_el_z+7, legend_label='Rightt Eye Diameter', line_width=1.5, line_color='red')
+        b_fig.line(x_axis, re_x_z+14, legend_label='Right Eye X Position', line_width=1, line_color='orange')
+        b_fig.line(x_axis, re_y_z, legend_label='Rightt Eye Y position', line_width=1, line_color='pink')
+        if export:
+            b_output.output_file(filename=str(self.analysis_path / f'pupillometry_block_{self.block_num}.html'),
+                                 title=f'block {self.block_num} pupillometry')
+        show(b_fig)

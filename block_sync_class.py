@@ -22,15 +22,6 @@ This script defines the BlockSync class which takes all of the relevant data for
 to produce a synchronized dataframe for all video sources to be used for further analysis
 '''
 
-"""
-Algorithm:
-1. Make sure the following files are in existence:
-    1. Open ephys parsed events
-    2. an arbitrary anchor signal for the timeframe which includes all video sources + electrophysiology
-    3. 
-     
-"""
-
 
 class BlockSync:
     """
@@ -157,7 +148,7 @@ class BlockSync:
         EDITOR branch of the xml
         :return:
         """
-        xml_tree = etree.parse(str(self.settings_xml))
+        xml_tree = etree.par(str(self.settings_xml))
         xml_root = xml_tree.getroot()
         for child in xml_root.iter():
             if child.tag == 'EDITOR':
@@ -507,17 +498,17 @@ class BlockSync:
                 open_ephys_events.to_csv(export_path)
         return open_ephys_events, open_ephys_off_events
 
-    def fix_timestamps(self):
-        """
-        This is a utility function which corrects the timestamps in the events.csv file
-        :return:
-        """
-        events_df = pd.read_csv(self.block_path / rf'oe_files\{self.exp_date_time}\events.csv')
-        s = pd.Series(((events_df['timestamp'].values - self.first_oe_timestamp) / self.sample_rate) * 1000)
-        events_df['timestamp'] = s
-        events_df.to_csv(self.block_path / rf'oe_files\{self.exp_date_time}\events.csv')
+    # def fix_timestamps(self):
+    #     """
+    #     This is a utility function which corrects the timestamps in the events.csv file
+    #     :return:
+    #     """
+    #     events_df = pd.read_csv(self.block_path / rf'oe_files\{self.exp_date_time}\events.csv')
+    #     s = pd.Series(((events_df['timestamp'].values - self.first_oe_timestamp) / self.sample_rate) * 1000)
+    #     events_df['timestamp'] = s
+    #     events_df.to_csv(self.block_path / rf'oe_files\{self.exp_date_time}\events.csv')
 
-    def parse_open_ephys_events(self, fix_timestamps=False):
+    def parse_open_ephys_events(self):
         """
         Method for parsing the Open Ephys events.csv results
 
@@ -530,9 +521,7 @@ class BlockSync:
             self.get_sample_rate()
         session = OEA.Session(str(self.oe_path))
         self.first_oe_timestamp = session.recordings[0].continuous[0].timestamps[0]
-        # correct the timestamps
-        if fix_timestamps:
-            self.fix_timestamps()
+
         # parse the events of the open-ephys recording
         self.oe_events, self.oe_off_events = BlockSync.oe_events_parser(
             self.block_path / rf'oe_files\{self.exp_date_time}\events.csv',
@@ -964,7 +953,7 @@ class BlockSync:
         self.re_video_sync_df = self.synced_videos_validated.drop(labels=['Arena_TTL', 'L_eye_TTL'], axis=1)
         for column in list(self.re_ellipses.columns):
             self.re_video_sync_df.insert(loc=len(self.re_video_sync_df.columns), column=column, value=None)
-        print('populating le_video_sync_df')
+        print('populating le_df')
         for row in tqdm(self.le_video_sync_df.index):
             frame = self.le_video_sync_df.L_eye_TTL[row]
             self.le_video_sync_df.loc[row, 'center_x'] = self.le_ellipses.iloc[frame]['center_x']
@@ -973,8 +962,8 @@ class BlockSync:
             self.le_video_sync_df.loc[row, 'height'] = self.le_ellipses.height[frame]
             self.le_video_sync_df.loc[row, 'phi'] = self.le_ellipses.phi[frame]
             self.le_video_sync_df.loc[row, 'ellipse_size'] = self.le_ellipses.ellipse_size[frame]
-            # le_video_sync_df.at[row, 'rostral_edge'] = le_ellipses.rostral_edge[frame]
-            # le_video_sync_df.at[row, 'caudal_edge'] = le_ellipses.caudal_edge[frame]
+            # le_df.at[row, 'rostral_edge'] = le_ellipses.rostral_edge[frame]
+            # le_df.at[row, 'caudal_edge'] = le_ellipses.caudal_edge[frame]
         print('populating re_video_sync_df')
         for row in tqdm(self.re_video_sync_df.index):
             frame = self.re_video_sync_df.R_eye_TTL[row]
