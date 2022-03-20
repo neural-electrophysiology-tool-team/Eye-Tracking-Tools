@@ -62,7 +62,7 @@ class BlockSync:
         self.animal_call = animal_call
         self.experiment_date = experiment_date
         self.block_num = block_num
-        self.path_to_animal_folder = path_to_animal_folder
+        self.path_to_animal_folder = pathlib.Path(path_to_animal_folder)
         if experiment_date is not None:
             self.block_path = pathlib.Path(
                 rf'{self.path_to_animal_folder}\{self.animal_call}\{self.experiment_date}\block_{self.block_num}')
@@ -71,7 +71,8 @@ class BlockSync:
                 rf'{self.path_to_animal_folder}\{self.animal_call}\block_{self.block_num}')
         print(f'instantiated block number {self.block_num} at Path: {self.block_path}')
         try:
-            self.exp_date_time = os.listdir(fr'{self.block_path}\oe_files')[0]
+            dir_to_check = self.block_path / "oe_files"
+            self.exp_date_time = os.listdir(dir_to_check)[0]
         except IndexError:
             print(f'block number {self.block_num} does not have open_ephys files')
 
