@@ -64,32 +64,19 @@ class BlockSync:
         self.experiment_date = experiment_date
         self.block_num = block_num
         self.path_to_animal_folder = pathlib.Path(path_to_animal_folder)
-        if platform.system() == 'Windows':
-            if experiment_date is not None:
-                self.block_path = pathlib.Path(
-                    rf'{self.path_to_animal_folder}\{self.animal_call}\{self.experiment_date}\block_{self.block_num}')
-            else:
-                self.block_path = pathlib.Path(
-                    rf'{self.path_to_animal_folder}\{self.animal_call}\block_{self.block_num}')
-            print(f'instantiated block number {self.block_num} at Path: {self.block_path}')
-            try:
-                dir_to_check = self.block_path / "oe_files"
-                self.exp_date_time = os.listdir(dir_to_check)[0]
-            except IndexError:
-                print(f'block number {self.block_num} does not have open_ephys files')
+        if experiment_date is not None:
+            self.block_path = pathlib.Path(
+                self.path_to_animal_folder) / self.animal_call / self.experiment_date / ('block_' + self.block_num)
         else:
-            if experiment_date is not None:
-                self.block_path = pathlib.Path(
-                    rf'{self.path_to_animal_folder}/{self.animal_call}/{self.experiment_date}/block_{self.block_num}')
-            else:
-                self.block_path = pathlib.Path(
-                    rf'{self.path_to_animal_folder}/{self.animal_call}/block_{self.block_num}')
-            print(f'instantiated block number {self.block_num} at Path: {self.block_path}')
-            try:
-                dir_to_check = self.block_path / "oe_files"
-                self.exp_date_time = os.listdir(dir_to_check)[0]
-            except IndexError:
-                print(f'block number {self.block_num} does not have open_ephys files')
+            self.block_path = pathlib.Path(
+                self.path_to_animal_folder) / self.animal_call / ('block_' + self.block_num)
+        print(f'instantiated block number {self.block_num} at Path: {self.block_path}')
+        try:
+            dir_to_check = self.block_path / "oe_files"
+            self.exp_date_time = os.listdir(dir_to_check)[0]
+        except IndexError:
+            print(f'block number {self.block_num} does not have open_ephys files')
+
         self.arena_path = self.block_path / 'arena_videos'
         self.arena_files = None
         self.arena_videos = None
@@ -206,6 +193,10 @@ class BlockSync:
                 return sample_rate
 
     def get_sample_rate_cont(self):
+        """
+        This is a function that determines the sample rate of a block via the first .continuous file in the oe_folder
+        :return: sample rate if found one
+        """
         file_name = sorted([i for i in os.listdir(self.oe_path) if '.continuous' in i])[0]
         file_path = self.oe_path / file_name
         f = open(file_path, 'rb')
@@ -267,6 +258,7 @@ class BlockSync:
     def handle_eye_videos(self):
         """
         This method converts and renames the eye tracking videos in the files tree into workable .mp4 files
+        ONLY WORKS ON WINDOWS MACHINES WITH MP4BOX INSTALLED AS A COMMAND LINE MODULE
         """
         print('handling eye video files')
         eye_vid_path = self.block_path / 'eye_videos'
@@ -400,9 +392,9 @@ class BlockSync:
         #self.first_oe_timestamp = session.recordings[0].continuous[0].timestamps[0]
         # parse the events of the open-ephys recording
 
-        ex_path = self.block_path / rf'oe_files\{self.exp_date_time}\parsed_events.csv'
+        ex_path = self.block_path / rf'oe_files' / self.exp_date_time / 'parsed_events.csv'
         self.oe_events, self.arena_vid_first_t, self.arena_vid_last_t = self.oe_events_parser(
-            self.block_path / rf'oe_files\{self.exp_date_time}\events.csv',
+            self.block_path / rf'oe_files' / self.exp_date_time / 'events.csv',
             self.channeldict,
             export_path=ex_path)
         print(f'created {ex_path}')
