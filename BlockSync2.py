@@ -1,21 +1,21 @@
 import glob
+import math
 import os
 import pathlib
 import subprocess as sp
+
 import cv2
 import numpy as np
 import open_ephys.analysis as OEA
 import pandas as pd
 import scipy.stats as stats
-from lxml import etree
 from bokeh.io import output as b_output
-from bokeh.plotting import figure, show
 from bokeh.models import HoverTool
+from bokeh.plotting import figure, show
 from ellipse import LsqEllipse
+from lxml import etree
+from scipy import signal
 from tqdm import tqdm
-import math
-import platform
-import re
 
 '''
 This script defines the BlockSync class which takes all of the relevant data for a given trial and can be utilized
@@ -41,7 +41,7 @@ class BlockSync:
 
     """
 
-    def __init__(self, animal_call, experiment_date, block_num, path_to_animal_folder):
+    def __init__(self, animal_call, experiment_date, block_num, path_to_animal_folder, channeldict=None):
         """
             defines the relevant block for analysis
 
@@ -58,6 +58,11 @@ class BlockSync:
 
             path_to_animal_folder :  str
                 path to the folder where animal_call folder is located
+
+            channeldict :  dict
+                a dictionary binding the I/O board inputs to specific channel names
+                (should ALWAYS correspond with the default template)
+
 
         """
         self.animal_call = animal_call
@@ -96,12 +101,15 @@ class BlockSync:
             self.arena_brightness_df = pd.read_csv(self.analysis_path / 'arena_brightness.csv')
         else:
             self.arena_brightness_df = None
-        self.channeldict = {
-            5: 'L_eye_TTL',
-            6: 'Arena_TTL',
-            7: 'Logical ON/OFF',
-            8: 'R_eye_TTL'
-        }
+        if channeldict is None:
+            self.channeldict = {
+                5: 'L_eye_TTL',
+                6: 'Arena_TTL',
+                7: 'Logical ON/OFF',
+                8: 'R_eye_TTL'
+            }
+        else:
+            self.channeldict = channeldict
         p = self.block_path / 'oe_files'
         dirname = os.listdir(p)
         self.oe_dirname = [i for i in dirname if (p / i).is_dir()][0]
@@ -139,15 +147,19 @@ class BlockSync:
         self.euclidean_speed_per_frame = None
         self.movement_df = None
         self.no_movement_frames = None
-        self.left_eye_pupil_speed = None
-        self.right_eye_pupil_speed = None
         self.saccade_dict = None
-        #self.first_oe_timestamp = None
+        # self.first_oe_timestamp = None
         self.eye_diff_list = None
         self.fixed_eye_brightness_df = None
         self.le_df = None
         self.re_df = None
         self.lag_direction = None
+        self.l_e_speed = None
+        self.r_e_speed = None
+        self.ms_axis = None
+        self.r_saccades = None
+        self.l_saccades = None
+        self.manual_sync_df = None
 
     def __str__(self):
         return str(f'{self.animal_call}, block {self.block_num}, on {self.exp_date_time}')
@@ -389,7 +401,7 @@ class BlockSync:
         # if self.sample_rate is None:
         #     self.get_sample_rate()
         session = OEA.Session(str(self.oe_path))
-        #self.first_oe_timestamp = session.recordings[0].continuous[0].timestamps[0]
+        # self.first_oe_timestamp = session.recordings[0].continuous[0].timestamps[0]
         # parse the events of the open-ephys recording
 
         ex_path = self.block_path / rf'oe_files' / self.exp_date_time / 'parsed_events.csv'
@@ -828,6 +840,9 @@ class BlockSync:
                        'right': r_rising}
         return dict_rising
 
+    def export_manual_sync_df(self):
+        self.manual_sync_df.to_csv(self.analysis_path / 'manual_sync_df.csv')
+
     def import_manual_sync_df(self):
         try:
             self.manual_sync_df = pd.read_csv(self.analysis_path / 'manual_sync_df.csv')
@@ -835,8 +850,11 @@ class BlockSync:
                 self.final_sync_df = self.manual_sync_df.drop(axis=1, labels='Unnamed: 0')
             else:
                 self.final_sync_df = self.manual_sync_df
+            # create a joint x axis with ms timebase for later use
+            self.ms_axis = (self.final_sync_df['Arena_TTL'].values -
+                            self.final_sync_df['Arena_TTL'].values[0]) / (self.sample_rate / 1000)
         except FileNotFoundError:
-            print('there is no manual sync file')
+            print('there is no manual sync file, manually sync the block with ')
 
     @staticmethod
     def eye_tracking_analysis(dlc_video_analysis_csv, uncertainty_thr):
@@ -917,7 +935,11 @@ class BlockSync:
         """
         if (self.analysis_path / 're_df.csv').exists() and (self.analysis_path / 'le_df.csv').exists():
             self.re_df = pd.read_csv(self.analysis_path / 're_df.csv')
+            if 'Unnamed: 0' in self.re_df.columns:
+                self.re_df = self.re_df.drop(axis=1, labels='Unnamed: 0')
             self.le_df = pd.read_csv(self.analysis_path / 'le_df.csv')
+            if 'Unnamed: 0' in self.le_df.columns:
+                self.le_df = self.le_df.drop(axis=1, labels='Unnamed: 0')
             print('eye dataframes loaded from analysis folder')
             return
 
@@ -974,7 +996,8 @@ class BlockSync:
             self.re_df.to_csv(self.analysis_path / 're_df.csv')
             self.le_df.to_csv(self.analysis_path / 'le_df.csv')
 
-    def block_eye_plot(self, export=False):
+    def block_eye_plot(self, export=False, ms_x_axis=True, plot_saccade_locs=False,
+                       saccade_frames_l=None, saccade_frames_r=None):
         # normalize values:
         le_el_z = (self.le_df.ellipse_size - self.le_df.ellipse_size.mean()) / self.le_df.ellipse_size.std()
         le_x_z = (self.le_df.center_x - np.mean(self.le_df.center_x)) / self.le_df.center_x.std()
@@ -982,7 +1005,11 @@ class BlockSync:
         re_el_z = (self.re_df.ellipse_size - self.re_df.ellipse_size.mean()) / self.re_df.ellipse_size.std()
         re_x_z = (self.re_df.center_x - np.mean(self.re_df.center_x)) / self.re_df.center_x.std()
         re_y_z = (self.re_df.center_y - np.mean(self.re_df.center_y)) / self.re_df.center_y.std()
-        x_axis = self.final_sync_df['Arena_TTL'].values
+        if ms_x_axis is False:
+            x_axis = self.final_sync_df['Arena_TTL'].values
+        else:
+            x_axis = (self.final_sync_df['Arena_TTL'].values -
+                      self.final_sync_df['Arena_TTL'].values[0]) / (self.sample_rate / 1000)
         b_fig = figure(title=f'Pupil combined metrics block {self.block_num}',
                        x_axis_label='OE Timestamps',
                        y_axis_label='Z score',
@@ -994,8 +1021,218 @@ class BlockSync:
         b_fig.line(x_axis, le_y_z, legend_label='Left Eye Y position', line_width=1, line_color='green')
         b_fig.line(x_axis, re_el_z+7, legend_label='Rightt Eye Diameter', line_width=1.5, line_color='red')
         b_fig.line(x_axis, re_x_z+14, legend_label='Right Eye X Position', line_width=1, line_color='orange')
-        b_fig.line(x_axis, re_y_z, legend_label='Rightt Eye Y position', line_width=1, line_color='pink')
+        b_fig.line(x_axis, re_y_z, legend_label='Right Eye Y position', line_width=1, line_color='pink')
+        if plot_saccade_locs:
+            b_fig.vbar(x=saccade_frames_l, width=1, bottom=-4, top=-1,
+                       alpha=0.8, color='purple', legend_label='Left saccades')
+            b_fig.vbar(x=saccade_frames_r, width=1, bottom=-4, top=-1,
+                       alpha=0.8, color='brown', legend_label='Right saccades')
         if export:
             b_output.output_file(filename=str(self.analysis_path / f'pupillometry_block_{self.block_num}.html'),
                                  title=f'block {self.block_num} pupillometry')
         show(b_fig)
+
+    def pupil_speed_calc(self):
+        lx = self.le_df.center_x.values
+        ly = self.le_df.center_y.values
+        rx = self.re_df.center_x.values
+        ry = self.re_df.center_y.values
+
+        diff_dict = {
+            'lx': np.diff(lx, prepend=1).astype(float),
+            'ly': np.diff(ly, prepend=1).astype(float),
+            'rx': np.diff(rx, prepend=1).astype(float),
+            'ry': np.diff(ry, prepend=1).astype(float),
+        }
+        self.l_e_speed = np.sqrt((diff_dict['lx'] ** 2) + (diff_dict['ly'] ** 2))
+        self.r_e_speed = np.sqrt((diff_dict['rx'] ** 2) + (diff_dict['ry'] ** 2))
+
+    def plot_speed_graph(self, ):
+        b_fig = figure(title='pupil speed graphs',
+                       x_axis_label='ms',
+                       y_axis_label='euclidean speed',
+                       plot_width=1500,
+                       plot_height=700)
+        x_axis = (self.final_sync_df['Arena_TTL'].values -
+                  self.final_sync_df['Arena_TTL'].values[0]) / (self.sample_rate / 1000)
+        b_fig.line(x_axis,
+                   self.l_e_speed,
+                   legend_label='Left eye speed',
+                   line_width=1.5,
+                   line_color='blue')
+        b_fig.line(x_axis,
+                   self.r_e_speed*-1,
+                   legend_label='inverse right eye speed',
+                   line_width=1.5,
+                   line_color='red')
+
+    def saccade_event_analayzer(self, threshold=2):
+        """
+        This method first finds the speed of the pupil in each frame, then detects saccade events
+        :param self:
+        :param export:
+        :param threshold:
+        :return:
+        """
+        # first, collect pupil speed:
+        self.pupil_speed_calc()
+        flag = 0
+        while flag == 0:
+            l_saccades = self.ms_axis[np.argwhere(self.l_e_speed > threshold)]
+            l_saccades = signal.medfilt(l_saccades[:, 0], 5)
+            r_saccades = self.ms_axis[np.argwhere(self.r_e_speed > threshold)]
+            r_saccades = signal.medfilt(r_saccades[:, 0], 5)
+            self.block_eye_plot(plot_saccade_locs=True, saccade_frames_r=r_saccades, saccade_frames_l=l_saccades)
+            answer = input('look at the graph - is the threshold for speed okay? y/n or abort')
+            if answer == 'y':
+                flag = 1
+            elif answer == 'n':
+                threshold = float(input('insert another threshold value to try'))
+            elif answer == 'abort':
+                print('giving up on the block')
+                return None
+            else:
+                print('bad input, going around again...')
+        self.l_saccades = l_saccades
+        self.r_saccades = r_saccades
+
+
+        """
+        # use detected saccades locations for saccade characterisation
+        # find consequitive frames and understand how many saccades there are in the trace for each axis:
+        s_dict = {}
+        for eye in ['l', 'r']:
+            s_start = []
+            s_mid = []
+            s_end = []
+            state = 'start'
+            if eye == 'l':
+                for i in range(len(l_saccades) - 1):
+                    if state == 'start':
+                        s_start.append(l_saccades[i])
+                        state = 'mid'
+                        continue
+                    if l_saccades[i] + 1 == l_saccades[i + 1]:
+                        s_mid.append(l_saccades[i])
+                        state = 'mid'
+                    else:
+                        s_end.append(l_saccades[i])
+                        state = 'start'
+                s_end.append(l_saccades[-1])
+
+            if eye == 'r':
+                for i in range(len(r_saccades) - 1):
+                    if state == 'start':
+                        s_start.append(r_saccades[i])
+                        state = 'mid'
+                        continue
+                    if r_saccades[i] + 1 == r_saccades[i + 1]:
+                        s_mid.append(r_saccades[i])
+                        state = 'mid'
+                    else:
+                        s_end.append(r_saccades[i])
+                        state = 'start'
+                s_end.append(r_saccades[-1])
+
+            s_dict[f'{eye}_start'] = s_start
+            s_dict[f'{eye}_ends'] = s_end
+            if len(s_end) == len(s_start):
+                s_dict[f'{eye}_len'] = np.array(s_end) - np.array(s_start)
+            elif len(s_end) == len(s_start) + 1:
+                if s_end[-2] == s_end[-1]:
+                    s_end.pop(-1)
+                    s_dict[f'{eye}_len'] = np.array(s_end) - np.array(s_start)
+            else:
+                print(f'there is a length problem where the saccades have {len(s_end)} ends and {len(s_start)} starts')
+                return None
+            # choose saccades with sufficient length
+            s_dict[f'{eye}_start'] = np.array(s_dict[f'{eye}_start'])[list(np.argwhere(s_dict[f'{eye}_len'] > 5)[:, 0])]
+            s_dict[f'{eye}_ends'] = np.array(s_dict[f'{eye}_ends'])[list(np.argwhere(s_dict[f'{eye}_len'] > 5)[:, 0])]
+
+        # collect all saccade x y info within a 25 frame window
+        velocity_dict = {
+            'l_velocity': [],
+            'r_velocity': []
+        }
+        for eye in ['l', 'r']:
+            s_dict[f'{eye}_y_loc'] = []
+            s_dict[f'{eye}_x_loc'] = []
+            for i in range(len(s_dict[f'{eye}_start'])):
+                try:
+                    x_axis = range(int(s_dict[f'{eye}_start'][i] - 25), int(s_dict[f'{eye}_start'][i] + 25))
+                except KeyError:
+                    continue
+                if eye == 'l':
+                    try:
+                        y_data = self.le_df.center_y[x_axis]
+                        x_data = self.le_df.center_x[x_axis]
+                    except KeyError:
+                        continue
+                    s_dict[f'{eye}_y_loc'].append(y_data)
+                    s_dict[f'{eye}_x_loc'].append(x_data)
+                    velocity_dict[f'{eye}_velocity'].append(self.l_e_speed[x_axis])
+                elif eye == 'r':
+                    try:
+                        y_data = self.re_df.center_y[x_axis]
+                        x_data = self.re_df.center_x[x_axis]
+                    except KeyError:
+                        continue
+                    s_dict[f'{eye}_y_loc'].append(y_data)
+                    s_dict[f'{eye}_x_loc'].append(x_data)
+                    velocity_dict[f'{eye}_velocity'].append(self.r_e_speed[x_axis])
+        saccade_dict = {
+            'l': [],
+            'r': []
+        }
+
+        # compute all saccades euclidean distance
+        magnitude_dict = {'l': [],
+                          'r': []}
+        for eye in ['l', 'r']:
+            for i in range(len(s_dict[f'{eye}_start'])):
+                try:
+                    starting_pos_x = s_dict[f'{eye}_x_loc'][i].iloc[25]
+                    starting_pos_y = s_dict[f'{eye}_y_loc'][i].iloc[25]
+                    s_frames = s_dict[f'{eye}_y_loc'][i].index.values
+                except IndexError:
+                    continue
+                r = []
+                for frame in s_frames:
+                    a = (s_dict[f'{eye}_y_loc'][i].loc[frame] - starting_pos_y) ** 2
+                    b = (s_dict[f'{eye}_x_loc'][i].loc[frame] - starting_pos_x) ** 2
+                    r.append(np.sqrt(a + b))
+                # Normalize for before (b) and saccade (s)
+                rs_min = np.min(r[25:])
+                rs_max = np.max(r[25:])
+                rb_min = np.min(r[0:25])
+                rb_max = np.max(r[0:25])
+                magnitude_dict[f'{eye}'].append(rs_max - rs_min)
+                rs_normalized = [(x - rs_min) / (rs_max - rs_min) for x in r[25:]]
+                rb_normalized = [((x - rb_min) / (rb_max - rb_min)) for x in r[0:25]]
+                r_normalized = rb_normalized + rs_normalized
+                saccade_dict[f'{eye}'].append(r_normalized)
+
+        self.saccade_dict = saccade_dict
+
+        # create the saccade df and slowly fill it up
+        saccade_df = pd.DataFrame(data=None,
+                                  columns=['starts', 'ends', 'magnitude', 'velocity', 'head_movements', 'r_dynamics'])
+        saccade_list = []
+        for eye in ['r', 'l']:
+            for row in range(len(s_dict[f'{eye}_start'])):
+                try:
+                    entry = {
+                        'starts': s_dict[f'{eye}_start'][row],
+                        'ends': s_dict[f'{eye}_ends'][row],
+                        'magnitude': magnitude_dict[f'{eye}'][row],
+                        'velocity': velocity_dict[f'{eye}_velocity'][row],
+                        'head_movement': None,
+                        'r_dynamics': self.saccade_dict[f'{eye}'][row],
+                        'x_dynamics': s_dict[f'{eye}_x_loc'][row],
+                        'y_dynamics': s_dict[f'{eye}_y_loc'][row]
+                    }
+                except IndexError:
+                    continue
+                saccade_list.append(entry)
+
+        self.saccade_list = saccade_list"""
