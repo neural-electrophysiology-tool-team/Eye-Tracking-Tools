@@ -352,14 +352,16 @@ class BlockSync:
                 diff_series = np.diff(s)
                 diff_mode = stats.mode(diff_series)[0][0]
                 arena_start_stop = np.where(diff_series > 10 * diff_mode)[0]
-                print(f'the arena TTLs are signaling start and stop positions at {arena_start_stop}')
                 if len(arena_start_stop) != 2:
-                    print(f'there is some kind of problem because there should be 2 breaks in the arena TTLs '
+                    raise ValueError(f'there is some kind of problem because there should be 2 breaks in the arena TTLs '
                           f'and there are {len(arena_start_stop)}')
-                arena_start_timestamp = s.iloc[arena_start_stop[0] + 1]
-                print(f'arena first frame timestamp: {arena_start_timestamp}')
-                arena_end_timestamp = s.iloc[arena_start_stop[1]]
-                print(f'arena end frame timestamp: {arena_end_timestamp}')
+
+                else:
+                    print(f'the arena TTLs are signaling start and stop positions at {arena_start_stop}')
+                    arena_start_timestamp = s.iloc[arena_start_stop[0] + 1]
+                    print(f'arena first frame timestamp: {arena_start_timestamp}')
+                    arena_end_timestamp = s.iloc[arena_start_stop[1]]
+                    print(f'arena end frame timestamp: {arena_end_timestamp}')
             else:
                 print(f'{sname} was not identified as {arena_channel_name}')
             # create a counter for every rising edge - these should match video frames
@@ -1059,12 +1061,23 @@ class BlockSync:
                                  title=f'block {self.block_num} pupillometry')
         show(b_fig)
 
-    def pupil_speed_calc(self):
-        lx = self.le_df.center_x.values
-        ly = self.le_df.center_y.values
-        rx = self.re_df.center_x.values
-        ry = self.re_df.center_y.values
+    def pupil_speed_calc(self, cheat=False):
 
+        """The cheat statemtment drops all Nan values from the dataframe via backfill which might create artifacts
+        this needs to be extrapolated by resampling the gaps left after dataloss and also account for missing large chunks
+        (under the cheat paradigm these will create artifacts)"""
+        if cheat:
+            le_df = self.le_df.fillna(method='backfill')
+            re_df = self.le_df.fillna(method='backfill')
+            lx = le_df.center_x.values
+            ly = le_df.center_y.values
+            rx = re_df.center_x.values
+            ry = re_df.center_y.values
+        else:
+            lx = self.le_df.center_x.values
+            ly = self.le_df.center_y.values
+            rx = self.re_df.center_x.values
+            ry = self.re_df.center_y.values
         diff_dict = {
             'lx': np.diff(lx, prepend=1).astype(float),
             'ly': np.diff(ly, prepend=1).astype(float),
@@ -1076,7 +1089,7 @@ class BlockSync:
         self.r_e_speed = np.sqrt((diff_dict['rx'] ** 2) + (diff_dict['ry'] ** 2))
         self.re_df['velocity'] = self.r_e_speed
 
-    def plot_speed_graph(self, ):
+    def plot_speed_graph(self):
         b_fig = figure(title='pupil speed graphs',
                        x_axis_label='ms',
                        y_axis_label='euclidean speed',
