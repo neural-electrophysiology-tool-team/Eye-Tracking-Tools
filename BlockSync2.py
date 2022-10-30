@@ -94,9 +94,15 @@ class BlockSync:
         self.arena_frame_val_list = None
         self.analysis_path = self.block_path / 'analysis'
         self.l_e_path = self.block_path / 'eye_videos' / 'LE'
-        self.l_e_path = self.l_e_path / os.listdir(self.l_e_path)[0]
+        try:
+            self.l_e_path = self.l_e_path / os.listdir(self.l_e_path)[0]
+        except IndexError:
+            print('No left eye videos to work with')
         self.r_e_path = self.block_path / 'eye_videos' / 'RE'
-        self.r_e_path = self.r_e_path / os.listdir(self.r_e_path)[0]
+        try:
+            self.r_e_path = self.r_e_path / os.listdir(self.r_e_path)[0]
+        except IndexError:
+            print('No right eye videos to work with')
         if (self.analysis_path / 'arena_brightness.csv').exists():
             self.arena_brightness_df = pd.read_csv(self.analysis_path / 'arena_brightness.csv')
             if 'Unnamed: 0' in self.arena_brightness_df.columns:
@@ -160,8 +166,8 @@ class BlockSync:
         self.r_saccades = None
         self.l_saccades = None
         self.manual_sync_df = None
-        self.r_saccades_a = None
-        self.l_saccades_a = None
+        self.r_saccades_chunked = None
+        self.l_saccades_chunked = None
 
     def __str__(self):
         return str(f'{self.animal_call}, block {self.block_num}, on {self.exp_date_time}')
@@ -1061,23 +1067,15 @@ class BlockSync:
                                  title=f'block {self.block_num} pupillometry')
         show(b_fig)
 
-    def pupil_speed_calc(self, cheat=False):
+    def pupil_speed_calc(self):
 
-        """The cheat statemtment drops all Nan values from the dataframe via backfill which might create artifacts
-        this needs to be extrapolated by resampling the gaps left after dataloss and also account for missing large chunks
-        (under the cheat paradigm these will create artifacts)"""
-        if cheat:
-            le_df = self.le_df.fillna(method='backfill')
-            re_df = self.le_df.fillna(method='backfill')
-            lx = le_df.center_x.values
-            ly = le_df.center_y.values
-            rx = re_df.center_x.values
-            ry = re_df.center_y.values
-        else:
-            lx = self.le_df.center_x.values
-            ly = self.le_df.center_y.values
-            rx = self.re_df.center_x.values
-            ry = self.re_df.center_y.values
+        """This function creates a per-frame-velocity vector and appends it to the r/l eye dataframes for
+        saccade analysis"""
+
+        lx = self.le_df.center_x.values
+        ly = self.le_df.center_y.values
+        rx = self.re_df.center_x.values
+        ry = self.re_df.center_y.values
         diff_dict = {
             'lx': np.diff(lx, prepend=1).astype(float),
             'ly': np.diff(ly, prepend=1).astype(float),
@@ -1107,34 +1105,57 @@ class BlockSync:
                    legend_label='inverse right eye speed',
                    line_width=1.5,
                    line_color='red')
+        show(b_fig)
 
-    def saccade_event_analayzer(self, threshold=2):
+    def saccade_event_analayzer(self, threshold=2, automatic=False):
         """
         This method first finds the speed of the pupil in each frame, then detects saccade events
-        :param self:
-        :param export:
-        :param threshold:
+        :param export: if TRUE will export a
+        :param threshold: The velocity threshold value to use
         :return:
+
+        of the entire movement, which is sometimes 0 depending on saccade velocity dynamics)
         """
+
         # first, collect pupil speed:
         self.pupil_speed_calc()
+
+        # now check if the anlaysis was already performed:
+        if (self.analysis_path / 'r_saccades.csv').exists() and (self.analysis_path / 'r_saccades.csv').exists():
+            self.r_saccades_chunked = pd.read_csv(self.analysis_path / 'r_saccades.csv')
+            self.l_saccades_chunked = pd.read_csv(self.analysis_path / 'l_saccades.csv')
+            if 'Unnamed: 0' in self.r_saccades_chunked.columns:
+                self.r_saccades_chunked = self.r_saccades_chunked.drop(axis=1, labels='Unnamed: 0')
+            if 'Unnamed: 0' in self.l_saccades_chunked.columns:
+                self.l_saccades_chunked = self.l_saccades_chunked.drop(axis=1, labels='Unnamed: 0')
+            print('loaded chunked saccade data from analysis folder')
+            return
+
+        # This section is a trial & error iteration with a dialogue to determine correct thresholding values
+
         flag = 0
         while flag == 0:
+            # This segment gets saccades according to a given threshold
             l_saccades = self.ms_axis[np.argwhere(self.l_e_speed > threshold)]
             l_saccades = signal.medfilt(l_saccades[:, 0], 5)
             r_saccades = self.ms_axis[np.argwhere(self.r_e_speed > threshold)]
             r_saccades = signal.medfilt(r_saccades[:, 0], 5)
-            self.block_eye_plot(plot_saccade_locs=True, saccade_frames_r=r_saccades, saccade_frames_l=l_saccades)
-            answer = input('look at the graph - is the threshold for speed okay? y/n or abort')
-            if answer == 'y':
-                flag = 1
-            elif answer == 'n':
-                threshold = float(input('insert another threshold value to try'))
-            elif answer == 'abort':
-                print('giving up on the block')
-                return None
+            if automatic is False:
+                # This segment plots it for inspection and prompts a different threshold when needed
+                self.block_eye_plot(plot_saccade_locs=True, saccade_frames_r=r_saccades, saccade_frames_l=l_saccades)
+                answer = input('look at the graph - is the threshold for speed okay? y/n or abort')
+                if answer == 'y':
+                    flag = 1
+                elif answer == 'n':
+                    threshold = float(input('insert another threshold value to try'))
+                elif answer == 'abort':
+                    print('giving up on the block')
+                    return None
+                else:
+                    print('bad input, going around again...')
             else:
-                print('bad input, going around again...')
+                print('automatic ON, Going ahead with the baseline threshold')
+                flag = 1
         self.l_saccades = l_saccades
         self.r_saccades = r_saccades
 
@@ -1192,23 +1213,9 @@ class BlockSync:
                 'saccade_magnitude': euclidean_distance
             })
 
-        self.r_saccades_a = tight_dict['right_eye_saccades']
-        self.l_saccades_a = tight_dict['left_eye_saccades']
+        self.r_saccades_chunked = tight_dict['right_eye_saccades']
+        self.l_saccades_chunked = tight_dict['left_eye_saccades']
+        self.r_saccades_chunked.to_csv(self.analysis_path / 'r_saccades.csv')
+        self.l_saccades_chunked.to_csv(self.analysis_path / 'l_saccades.csv')
 
-        ndict = {}
-        for eye in ['left_eye_saccades', 'right_eye_saccades']:
-            start = np.array(df_dict[eye]['saccade_start'].dropna())
-            end = np.array(df_dict[eye]['saccade_end'].dropna())
-            lengths = (end - start) // 17.05
-            df = pd.DataFrame({'start_times': start,
-                               'length': lengths})
 
-            ndict[eye] = df
-
-    def get_accelerometer_data(self):
-        oes = OEA.Session(self.oe_path)
-        data = oes.recordings[0].continuous[0].samples
-        self.accel_data = data[:, 32:]
-        z_ax = self.accel_data[:, 2]
-        y_ax = self.accel_data[:, 1]
-        x_ax = self.accel_data[:, 0]
