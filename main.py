@@ -1,1 +1,1 @@
-print('This is a jupyter based pipeline, use pipeline.ipynb to define analysis procedures')
+print('This is a jupyter based pipeline, use the different .ipynb files to define analysis procedures')

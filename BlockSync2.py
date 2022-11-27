@@ -168,6 +168,8 @@ class BlockSync:
         self.manual_sync_df = None
         self.r_saccades_chunked = None
         self.l_saccades_chunked = None
+        self.L_pix_size = None
+        self.R_pix_size = None
 
     def __str__(self):
         return str(f'{self.animal_call}, block {self.block_num}, on {self.exp_date_time}')
@@ -1110,18 +1112,15 @@ class BlockSync:
     def saccade_event_analayzer(self, threshold=2, automatic=False):
         """
         This method first finds the speed of the pupil in each frame, then detects saccade events
-        :param export: if TRUE will export a
         :param threshold: The velocity threshold value to use
         :return:
-
-        of the entire movement, which is sometimes 0 depending on saccade velocity dynamics)
         """
 
         # first, collect pupil speed:
         self.pupil_speed_calc()
 
         # now check if the anlaysis was already performed:
-        if (self.analysis_path / 'r_saccades.csv').exists() and (self.analysis_path / 'r_saccades.csv').exists():
+        if (self.analysis_path / 'r_saccades.csv').exists() and (self.analysis_path / 'l_saccades.csv').exists():
             self.r_saccades_chunked = pd.read_csv(self.analysis_path / 'r_saccades.csv')
             self.l_saccades_chunked = pd.read_csv(self.analysis_path / 'l_saccades.csv')
             if 'Unnamed: 0' in self.r_saccades_chunked.columns:
@@ -1204,6 +1203,7 @@ class BlockSync:
             elif eye == 'right_eye_saccades':
                 start_conditions = self.re_df.iloc[self.re_df['ms_axis'].isin(start).values]
                 end_conditions = self.re_df.iloc[self.re_df['ms_axis'].isin(end).values]
+
             euclidean_distance = np.sqrt(
                 (start_conditions['center_x'].values - end_conditions['center_x'].values) ** 2 +
                 (start_conditions['center_y'].values - end_conditions['center_y'].values) ** 2)
@@ -1218,4 +1218,51 @@ class BlockSync:
         self.r_saccades_chunked.to_csv(self.analysis_path / 'r_saccades.csv')
         self.l_saccades_chunked.to_csv(self.analysis_path / 'l_saccades.csv')
 
+    def calibrate_pixel_size(self, known_dist, overwrite=False):
+        """
+        This function takes in a known distance in mm and returns a calculation of the pixel size in each video according to
+        an ROI of given known distance in the L/R frames
+        :param block: BlockSync object of a trial with eye videos
+        :param known_dist: The distance to use for calibration measured in mm
+        :param overwrite: If True will run the method even if the output df already exists
+        :return: L and R values for pixel real-world size
+        """
+        # first check if this calibration already exists for the block:
+        if not overwrite:
+            if (self.analysis_path / 'LR_pix_size.csv').exists():
+                internal_df = pd.read_csv(self.analysis_path / 'LR_pix_size.csv')
+                self.L_pix_size = internal_df.at[0, 'L_pix_size']
+                self.R_pix_size = internal_df.at[0, 'R_pix_size']
+                print("got the calibration values from the analysis folder")
+                return
+
+        # get the first frames of both eyes as reference images
+        # define the eye VideoCaptures
+        rcap = cv2.VideoCapture(self.re_videos[0])
+        lcap = cv2.VideoCapture(self.le_videos[0])
+
+        # get the second frames:
+        lcap.set(1, 1)
+        lret, lframe = lcap.read()
+        rcap.set(1, 1)
+        rret, rframe = rcap.read()
+        if rret and lret:
+            Rroi = cv2.selectROI("select the area of the known measurement through the diagonal of the ROI", rframe)
+            Lroi = cv2.selectROI("select the area of the known measurement through the diagonal of the ROI", lframe)
+        else:
+            print('some trouble with the video retrieval, check paths and try again')
+        R_dist = np.sqrt(Rroi[2] ** 2 + Rroi[3] ** 2)
+        L_dist = np.sqrt(Lroi[2] ** 2 + Lroi[3] ** 2)
+
+        self.L_pix_size = known_dist / L_dist
+        self.R_pix_size = known_dist / R_dist
+
+        cv2.destroyAllWindows()
+
+        # save these values to a dataframe for re-initializing the block:
+        internal_df = pd.DataFrame(columns=['L_pix_size','R_pix_size'])
+        internal_df.at[0, 'L_pix_size'] = self.L_pix_size
+        internal_df.at[0, 'R_pix_size'] = self.R_pix_size
+        internal_df.to_csv(self.analysis_path / 'LR_pix_size.csv', index=False)
+        print(f'exported to {self.analysis_path / "LR_pix_size.csv"}')
 
