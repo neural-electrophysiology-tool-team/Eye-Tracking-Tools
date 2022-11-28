@@ -32,7 +32,7 @@ class BlockSync:
      where each block contains the next structure:
      Animal_call
           ||
-          Date(dd_mm_yyyy) >> block_x
+          Date(yyyy_mm_dd) >> block_x
                         ||
                 Arena_videos -> reptilearn output
                 eye_videos -> LE/RE -> video_folder -> video.h264 + .mp4, DLC analysis file.csv, timestamps.csv
