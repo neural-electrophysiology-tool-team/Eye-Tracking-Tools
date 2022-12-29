@@ -127,7 +127,7 @@ def analyzed_block_automated_pipe(block):
     block.saccade_event_analayzer(threshold=1.5,automatic=True)
 
 
-def long_looper_arousal_pupil_diameter_saccades(date,block_n):
+def long_looper_arousal_pupil_diameter_saccades(date, block_n):
 
     experiments_path = pathlib.Path(r"Z:\Nimrod\experiments")
     animal = "PV_24"
@@ -584,8 +584,8 @@ def plot_kde(ax, x, y, nbins, title, xlim=False, ylim=False, global_max=None, gl
         minimal_coordinate= global_min
         maximal_coordinate = global_max
     else:
-        minimal_coordinate= min([x.min(),y.min()])
-        maximal_coordinate = max([x.max(),y.max()])
+        minimal_coordinate= min([x.min(), y.min()])
+        maximal_coordinate = max([x.max(), y.max()])
     xi, yi = np.mgrid[minimal_coordinate:maximal_coordinate:nbins*1j, minimal_coordinate:maximal_coordinate:nbins*1j]
     zi = k(np.vstack([xi.flatten(), yi.flatten()]))
     ax.set_title(str(title))
@@ -594,5 +594,5 @@ def plot_kde(ax, x, y, nbins, title, xlim=False, ylim=False, global_max=None, gl
         ax.set_xlim(xlim)
     if ylim:
         ax.set_ylim(ylim)
-    ax.set_aspect('equal','box')
+    ax.set_aspect('equal', 'box')
     return sp

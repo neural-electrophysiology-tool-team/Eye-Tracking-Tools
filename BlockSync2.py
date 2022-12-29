@@ -1044,6 +1044,7 @@ class BlockSync:
         re_y_z = (self.re_df.center_y - np.mean(self.re_df.center_y)) / self.re_df.center_y.std()
         if ms_x_axis is False:
             x_axis = self.final_sync_df['Arena_TTL'].values
+
         else:
             x_axis = (self.final_sync_df['Arena_TTL'].values -
                       self.final_sync_df['Arena_TTL'].values[0]) / (self.sample_rate / 1000)
