@@ -6,7 +6,7 @@ import subprocess as sp
 
 import cv2
 import numpy as np
-import open_ephys.analysis as OEA
+import open_ephys.analysis as oea
 import pandas as pd
 import scipy.stats as stats
 from bokeh.io import output as b_output
@@ -41,7 +41,7 @@ class BlockSync:
 
     """
 
-    def __init__(self, animal_call, experiment_date, block_num, path_to_animal_folder, channeldict=None):
+    def __init__(self, animal_call, experiment_date, block_num, path_to_animal_folder, channeldict=None, regev=False):
         """
             defines the relevant block for analysis
 
@@ -82,7 +82,11 @@ class BlockSync:
         except IndexError:
             print(f'block number {self.block_num} does not have open_ephys files')
 
-        self.arena_path = self.block_path / 'arena_videos'
+        if regev:
+            self.arena_path = self.block_path / 'arena_videos' / 'videos'
+        else:
+            self.arena_path = self.block_path / 'arena_videos'
+
         self.arena_files = None
         self.arena_videos = None
         self.arena_vidnames = None
@@ -106,11 +110,12 @@ class BlockSync:
         if (self.analysis_path / 'arena_brightness.csv').exists():
             self.arena_brightness_df = pd.read_csv(self.analysis_path / 'arena_brightness.csv')
             if 'Unnamed: 0' in self.arena_brightness_df.columns:
-                self.arena_brightness_df = self.arena_brightness_df.drop(axis=1,labels='Unnamed: 0')
+                self.arena_brightness_df = self.arena_brightness_df.drop(axis=1, labels='Unnamed: 0')
         else:
             self.arena_brightness_df = None
         if channeldict is None:
             self.channeldict = {
+                4: 'LED_driver',
                 5: 'L_eye_TTL',
                 6: 'Arena_TTL',
                 7: 'Logical ON/OFF',
@@ -120,13 +125,19 @@ class BlockSync:
             self.channeldict = channeldict
         p = self.block_path / 'oe_files'
         dirname = os.listdir(p)
-        self.oe_dirname = [i for i in dirname if (p / i).is_dir()][0]
-        p = self.block_path / 'oe_files' / self.oe_dirname
-        dirname = os.listdir(p)
-        self.rec_node_dirname = [i for i in dirname if (p / i).is_dir()][0]
-        self.oe_path = self.block_path / 'oe_files' / self.oe_dirname / self.rec_node_dirname
-        self.settings_xml = self.oe_path / 'settings.xml'
-        self.sample_rate = self.get_sample_rate()
+        try:
+            self.oe_dirname = [i for i in dirname if (p / i).is_dir()][0]
+            p = self.block_path / 'oe_files' / self.oe_dirname
+            dirname = os.listdir(p)
+        except IndexError:
+            print('No open ephys files here!!!!')
+        try:
+            self.rec_node_dirname = [i for i in dirname if (p / i).is_dir()][0]
+            self.oe_path = self.block_path / 'oe_files' / self.oe_dirname / self.rec_node_dirname
+            self.settings_xml = self.oe_path / 'settings.xml'
+            self.sample_rate = self.get_sample_rate()
+        except IndexError:
+            print('No open ephys record node here!!!')
         self.oe_events = None
         self.ts_dict = None
         self.block_starts = None
@@ -170,6 +181,7 @@ class BlockSync:
         self.l_saccades_chunked = None
         self.L_pix_size = None
         self.R_pix_size = None
+        self.eye_diff_mode = None
 
     def __str__(self):
         return str(f'{self.animal_call}, block {self.block_num}, on {self.exp_date_time}')
@@ -244,7 +256,7 @@ class BlockSync:
         """
         csv_export_path = self.block_path / 'oe_files' / self.oe_dirname / 'events.csv'
         if not csv_export_path.is_file():
-            session = OEA.Session(str(self.oe_path))
+            session = oea.Session(str(self.oe_path))
             events_df = session.recordings[0].events
             events_df.to_csv(csv_export_path)
             print(f'open ephys events exported to csv file at {csv_export_path}')
@@ -361,7 +373,7 @@ class BlockSync:
                 diff_mode = stats.mode(diff_series)[0][0]
                 arena_start_stop = np.where(diff_series > 10 * diff_mode)[0]
                 if len(arena_start_stop) != 2:
-                    raise ValueError(f'there is some kind of problem because there should be 2 breaks in the arena TTLs '
+                    raise ValueError(f'there is some kind of problem because there should be 2 breaks in the arena TTLs'
                           f'and there are {len(arena_start_stop)}')
 
                 else:
@@ -405,7 +417,7 @@ class BlockSync:
         # understand the samplerate and the first timestamp
         # if self.sample_rate is None:
         #     self.get_sample_rate()
-        session = OEA.Session(str(self.oe_path))
+        session = oea.Session(str(self.oe_path))
         # self.first_oe_timestamp = session.recordings[0].continuous[0].timestamps[0]
         # parse the events of the open-ephys recording
 
@@ -743,6 +755,7 @@ class BlockSync:
     def blink_rising_edges_detector(b_series, f_series, threshold):
         """
         This function finds the rising edge of each blinking event in a list of frames' brightness values
+        :param threshold:
         :param b_series: value of one brightness column from the eye_brightness_df object
         :param f_series: the frame numbers for the b_series (should be taken from the same DataFrame)
         :return: a list of indexes along the series which correspond with rising edges immediately after blinking events
@@ -1057,7 +1070,7 @@ class BlockSync:
         b_fig.line(x_axis, le_el_z+7, legend_label='Left Eye Diameter', line_width=1.5, line_color='blue')
         b_fig.line(x_axis, le_x_z+14, legend_label='Left Eye X Position', line_width=1, line_color='cyan')
         b_fig.line(x_axis, le_y_z, legend_label='Left Eye Y position', line_width=1, line_color='green')
-        b_fig.line(x_axis, re_el_z+7, legend_label='Rightt Eye Diameter', line_width=1.5, line_color='red')
+        b_fig.line(x_axis, re_el_z+7, legend_label='Right Eye Diameter', line_width=1.5, line_color='red')
         b_fig.line(x_axis, re_x_z+14, legend_label='Right Eye X Position', line_width=1, line_color='orange')
         b_fig.line(x_axis, re_y_z, legend_label='Right Eye Y position', line_width=1, line_color='pink')
         if plot_saccade_locs:
@@ -1113,6 +1126,8 @@ class BlockSync:
     def saccade_event_analayzer(self, threshold=2, automatic=False):
         """
         This method first finds the speed of the pupil in each frame, then detects saccade events
+        :param automatic: when set to true, will go with the given threshold and not prompt the user for input,
+        might create a wrongly thresholded dataset - use with caution
         :param threshold: The velocity threshold value to use
         :return:
         """
@@ -1221,8 +1236,8 @@ class BlockSync:
 
     def calibrate_pixel_size(self, known_dist, overwrite=False):
         """
-        This function takes in a known distance in mm and returns a calculation of the pixel size in each video according to
-        an ROI of given known distance in the L/R frames
+        This function takes in a known distance in mm and returns a calculation of the pixel size in each video 
+        according to an ROI of given known distance in the L/R frames
         :param block: BlockSync object of a trial with eye videos
         :param known_dist: The distance to use for calibration measured in mm
         :param overwrite: If True will run the method even if the output df already exists
