@@ -3,7 +3,6 @@ import math
 import os
 import pathlib
 import subprocess as sp
-
 import cv2
 import numpy as np
 import open_ephys.analysis as oea
@@ -16,6 +15,7 @@ from ellipse import LsqEllipse
 from lxml import etree
 from scipy import signal
 from tqdm import tqdm
+from OERecording import *
 
 '''
 This script defines the BlockSync class which takes all of the relevant data for a given trial and can be utilized
@@ -136,10 +136,17 @@ class BlockSync:
             self.oe_path = self.block_path / 'oe_files' / self.oe_dirname / self.rec_node_dirname
             self.settings_xml = self.oe_path / 'settings.xml'
             self.sample_rate = self.get_sample_rate()
+            oe_metadata_file_path = [i for i in self.oe_path.iterdir() if 'OE_metaData' in str(i)][0]
+            if oe_metadata_file_path.is_file():
+                self.oe_metadata_file_path = oe_metadata_file_path
+                # try:
+                self.oe_rec = OERecording(self.oe_metadata_file_path)
+                print('created the .oe_rec attribute as an open ephys recording obj with get_data functionality')
+                # except Exception:
+                #     print('OERecording file could not be constructed')
         except IndexError:
             print('No open ephys record node here!!!')
         self.oe_events = None
-        self.ts_dict = None
         self.block_starts = None
         self.block_ends = None
         self.block_length = None
@@ -182,6 +189,8 @@ class BlockSync:
         self.L_pix_size = None
         self.R_pix_size = None
         self.eye_diff_mode = None
+        self.zeroth_sample_number = None
+        self.get_zeroth_sample_number()
 
     def __str__(self):
         return str(f'{self.animal_call}, block {self.block_num}, on {self.exp_date_time}')
@@ -249,17 +258,48 @@ class BlockSync:
             print('could not find the sample rate')
             return None
 
-    def oe_events_to_csv(self):
+    def oe_events_to_csv(self, align_to_zero=True):
         """
-        This method takes the open ephys events and puts them in a csv file
+        This method takes the open ephys events and puts them in a csv file, if align ot zero is true will align first
+        acquired sample with sample # 0 (the native OpenEphys timestamps are aligned to oe clock 0, which is almost
+        always prior to acquisition start)
 
         """
+        # helper functions:
+        def subtract_number_from_column(df, subtraction_number, column_names):
+            """
+            This function deals with aligning open-ephys events such
+            that sample #0t is given to the first aquired sample
+            """
+            # Create a copy of the DataFrame to avoid modifying the original
+            subtracted_df = df.copy()
+
+            # Iterate over the column names in the list
+            for column_name in column_names:
+                # Check if the column exists in the DataFrame
+                if column_name in subtracted_df.columns:
+                    # Get the indices where the column value is not NaN
+                    indices = subtracted_df.index[~pd.isna(subtracted_df[column_name])]
+
+                    # Subtract the subtraction number from the selected indices
+                    subtracted_df.loc[indices, column_name] -= subtraction_number
+
+            return subtracted_df
+
         csv_export_path = self.block_path / 'oe_files' / self.oe_dirname / 'events.csv'
         if not csv_export_path.is_file():
-            session = oea.Session(str(self.oe_path))
-            events_df = session.recordings[0].events
-            events_df.to_csv(csv_export_path)
-            print(f'open ephys events exported to csv file at {csv_export_path}')
+            session = oea.Session(str(self.oe_path.parent))
+            events_df = session.recordnodes[0].recordings[0].events
+            if align_to_zero:
+                print(f'aligning to zero with {self.zeroth_sample_number}')
+                subtracted_df = subtract_number_from_column(events_df,
+                                                            int(self.zeroth_sample_number),
+                                                            ['sample_number'])
+                subtracted_df.to_csv(csv_export_path)
+                print(f'open ephys events aligned to zero & exported to csv file at {csv_export_path}')
+            else:
+                events_df.to_csv(csv_export_path)
+                print(f'open ephys events exported to csv file at {csv_export_path}')
         else:
             print('events.csv file already exists')
 
@@ -287,7 +327,8 @@ class BlockSync:
         self.arena_timestamps = [x for x in self.arena_files if x.suffix == '.csv']
         if len(self.arena_timestamps) == 0:
             try:
-                self.arena_timestamps = [x for x in [y for y in (self.arena_path / 'frames_timestamps').iterdir()] if x.suffix == '.csv']
+                self.arena_timestamps = \
+                    [x for x in [y for y in (self.arena_path / 'frames_timestamps').iterdir()] if x.suffix == '.csv']
             except FileNotFoundError:
                 print('no arena timestamps folder found')
         self.arena_vidnames = [i.name for i in self.arena_videos]
@@ -381,8 +422,10 @@ class BlockSync:
                     diff_mode = stats.mode(diff_series)[0][0]
                     arena_start_stop = np.where(diff_series > 10 * diff_mode)[0]
                     if len(arena_start_stop) != 2:
-                        start_ind = input(f'there is some kind of problem because there should be 2 breaks in the arena TTLs'
-                                          f'and there are {len(arena_start_stop)}, those indices are: {[s.iloc[i] for i in arena_start_stop]}... '
+                        start_ind = input(f'there is some kind of problem because '
+                                          f'there should be 2 breaks in the arena TTLs'
+                                          f'and there are {len(arena_start_stop)}, those indices are: '
+                                          f'{[s.iloc[i] for i in arena_start_stop]}... '
                                           f'choose the index to use as startpoint:')
                         end_ind = input('choose the index to use as endpoint:')
                         arena_start_timestamp = s.iloc[arena_start_stop[int(start_ind)] + 1]
@@ -416,7 +459,7 @@ class BlockSync:
 
         return open_ephys_events, arena_start_timestamp, arena_end_timestamp
 
-    def parse_open_ephys_events(self):
+    def parse_open_ephys_events(self, align_to_zero=True):
         """
         Gets the sample rate from the settings.xml file
         Creates the parsed_events.csv file
@@ -425,11 +468,11 @@ class BlockSync:
         """
         print('running parse_open_ephys_events...')
         # First, create the events.csv file:
-        self.oe_events_to_csv()
+        self.oe_events_to_csv(align_to_zero=align_to_zero)
         # understand the samplerate and the first timestamp
         # if self.sample_rate is None:
         #     self.get_sample_rate()
-        session = oea.Session(str(self.oe_path))
+        # session = oea.Session(str(self.oe_path))
         # self.first_oe_timestamp = session.recordings[0].continuous[0].timestamps[0]
         # parse the events of the open-ephys recording
 
@@ -768,33 +811,6 @@ class BlockSync:
     @staticmethod
     def blink_rising_edges_detector(b_series, f_series, threshold):
         """
-        This function finds the rising edge of each blinking event in a list of frames' brightness values
-        :param threshold:
-        :param b_series: value of one brightness column from the eye_brightness_df object
-        :param f_series: the frame numbers for the b_series (should be taken from the same DataFrame)
-        :return: a list of indexes along the series which correspond with rising edges immediately after blinking events
-        """
-        # create the b_series object with indexes from the synchronized dataframe:
-        b_series = pd.Series(data=b_series, index=f_series)
-        # find events where the threshold is crossed and return their indexes:
-        blink_indexes = b_series[b_series < threshold].index
-        # now reduce them to the first index in each cluster:
-        rising_edges = []
-        for i, f in enumerate(blink_indexes):
-            try:
-                if f + 1 == blink_indexes[i + 1]:
-                    # print(f'{f} is before {blink_indexes[i+1]} so I continue')
-                    continue
-                else:
-                    rising_edges.append(f + 1)
-                    # print(f'found a rising edge on frame {f+1} with a brightness value of {b_series[f+1]}')
-            except IndexError:
-                print(f'index error on position {i} out of {len(blink_indexes)}')
-        return rising_edges
-
-    @staticmethod
-    def blink_rising_edges_detector_V2(b_series, f_series, threshold):
-        """
         This function finds the rising edge of each blinking event in a list of frames' brightness values, but uses
         the differential instead of the absolute values for a clearer picture
         :param threshold:
@@ -838,9 +854,9 @@ class BlockSync:
         return ls[lowest_dist_ind]
 
     def get_eyes_diff_list(self, threshold):
-        r_rising = self.blink_rising_edges_detector_V2(self.eye_brightness_df['R_values'].values,
+        r_rising = self.blink_rising_edges_detector(self.eye_brightness_df['R_values'].values,
                                                     self.eye_brightness_df['R_eye_frame'], threshold=threshold)
-        l_rising = self.blink_rising_edges_detector_V2(self.eye_brightness_df['L_values'].values,
+        l_rising = self.blink_rising_edges_detector(self.eye_brightness_df['L_values'].values,
                                                     self.eye_brightness_df['L_eye_frame'], threshold=threshold)
         rising_d = {
             'right': r_rising,
@@ -895,10 +911,10 @@ class BlockSync:
     def get_blink_frames_manual(self, threshold=-35):
 
         """This is a utility function which detects rising edges for manual synchronization of eyes and arena"""
-        r_rising = self.blink_rising_edges_detector_V2(self.manual_sync_df['R_values'].values,
-                                                    self.manual_sync_df['R_eye_frame'], threshold=threshold)
-        l_rising = self.blink_rising_edges_detector_V2(self.manual_sync_df['L_values'].values,
-                                                    self.manual_sync_df['L_eye_frame'], threshold=threshold)
+        r_rising = self.blink_rising_edges_detector(self.manual_sync_df['R_values'].values,
+                                                       self.manual_sync_df['R_eye_frame'], threshold=threshold)
+        l_rising = self.blink_rising_edges_detector(self.manual_sync_df['L_values'].values,
+                                                       self.manual_sync_df['L_eye_frame'], threshold=threshold)
         dict_rising = {'left': l_rising,
                        'right': r_rising}
         return dict_rising
@@ -934,7 +950,7 @@ class BlockSync:
     def export_manual_sync_df(self):
         self.manual_sync_df.to_csv(self.analysis_path / 'manual_sync_df.csv')
 
-    def import_manual_sync_df(self):
+    def import_manual_sync_df(self, align_zero=True):
         try:
             self.manual_sync_df = pd.read_csv(self.analysis_path / 'manual_sync_df.csv')
             if 'Unnamed: 0' in self.manual_sync_df.columns:
@@ -942,8 +958,11 @@ class BlockSync:
             else:
                 self.final_sync_df = self.manual_sync_df
             # create a joint x axis with ms timebase for later use
-            self.ms_axis = (self.final_sync_df['Arena_TTL'].values -
-                            self.final_sync_df['Arena_TTL'].values[0]) / (self.sample_rate / 1000)
+            if align_zero:
+                self.ms_axis = self.final_sync_df['Arena_TTL'].values / (self.sample_rate / 1000)
+            else:
+                self.ms_axis = (self.final_sync_df['Arena_TTL'].values -
+                                self.final_sync_df['Arena_TTL'].values[0]) / (self.sample_rate / 1000)
         except FileNotFoundError:
             print('there is no manual sync file, manually sync the block')
 
@@ -1109,8 +1128,7 @@ class BlockSync:
                            plot_width=1500,
                            plot_height=700)
         else:
-            x_axis = (self.final_sync_df['Arena_TTL'].values -
-                      self.final_sync_df['Arena_TTL'].values[0]) / (self.sample_rate / 1000)
+            x_axis = self.final_sync_df['Arena_TTL'].values / (self.sample_rate / 1000)
             b_fig = figure(title=f'Pupil combined metrics block {self.block_num}',
                            x_axis_label='[Milliseconds]',
                            y_axis_label='[Z score]',
@@ -1135,13 +1153,13 @@ class BlockSync:
 
     def pupil_speed_calc(self):
 
-        """This function creates a per-frame-velocity vector and appends it to the r/l eye dataframes for
-        saccade analysis"""
+        """This function creates a per-frame-velocity vector and
+        appends it to the r/l eye dataframes for saccade analysis"""
 
-        lx = self.le_df.center_x.values
-        ly = self.le_df.center_y.values
-        rx = self.re_df.center_x.values
-        ry = self.re_df.center_y.values
+        lx = self.le_df.center_x.fillna(np.nan).values
+        ly = self.le_df.center_y.fillna(np.nan).values
+        rx = self.re_df.center_x.fillna(np.nan).values
+        ry = self.re_df.center_y.fillna(np.nan).values
         diff_dict = {
             'lx': np.diff(lx, prepend=1).astype(float),
             'ly': np.diff(ly, prepend=1).astype(float),
@@ -1270,9 +1288,13 @@ class BlockSync:
                 start_conditions = self.re_df.iloc[self.re_df['ms_axis'].isin(start).values]
                 end_conditions = self.re_df.iloc[self.re_df['ms_axis'].isin(end).values]
 
-            euclidean_distance = np.sqrt(
-                (start_conditions['center_x'].values - end_conditions['center_x'].values) ** 2 +
-                (start_conditions['center_y'].values - end_conditions['center_y'].values) ** 2)
+            #This segment deals with getting the euclidean distance without trying to take the sqrt of 0:
+            dist_squared = ((start_conditions['center_x'].values - end_conditions['center_x'].values) ** 2) + \
+                           ((start_conditions['center_y'].values - end_conditions['center_y'].values) ** 2)
+            sqrt_values = np.sqrt(dist_squared[dist_squared != 0].astype(float))
+            euclidean_distance = np.zeros_like(dist_squared)
+            euclidean_distance[dist_squared != 0] = sqrt_values
+            #euclidean_distance = np.where(dist_squared != 0, np.sqrt(dist_squared[dist_squared != 0]), 0)
             tight_dict[eye] = pd.DataFrame({
                 'saccade_start_ms': start,
                 'saccade_length_frames': lengths,
@@ -1332,3 +1354,40 @@ class BlockSync:
         internal_df.to_csv(self.analysis_path / 'LR_pix_size.csv', index=False)
         print(f'exported to {self.analysis_path / "LR_pix_size.csv"}')
 
+    def get_zeroth_sample_number(self):
+        """
+        Open-ephys recordings write events from an imaginary zeroth timestamp a few seconds before sample recording
+        actually starts. This creates a lag between the file's internal timestamps as saved in the timestamps stream of
+        different continuous channels and the count-based timestamps paradigm of the matlab code from Mark.
+        To correct this, I need to take the first sample number of this recording and subtract it from all
+        timestamps-based synchronization (primarily events) so that everything can live on a ms timebase counted from
+        sample#0
+        :return:
+        """
+
+        print(f'retrieving zertoh sample number for block {self.block_num}')
+
+        # first, try and get the sample_num from a pre-performed step:
+        if self.oe_rec is not None:
+            # if access to the recording metadata exists calculate the zeroth lag with the sample_rate
+            self.zeroth_sample_number = int(self.oe_rec.globalStartTime_ms*(self.sample_rate / 1000))
+
+        elif (self.analysis_path / 'zeroth_sample_num.csv').exists():
+            df = pd.read_csv(self.analysis_path / 'zeroth_sample_num.csv')
+            self.zeroth_sample_number = df['zeroth_sample_num'][0]
+            print('read zeroth sample number from .csv file')
+            del df
+            return
+
+        else:
+            print('Never been done, opening OE data recording the long way to get it...')
+            # open the OE datafile to get the number of the first recorded sample:
+            session = oea.Session(str(self.oe_path.parent))
+            zeroth_sample_num = [session.recordnodes[0].recordings[0].continuous[0].sample_numbers[0]]
+            self.zeroth_sample_number = zeroth_sample_num[0]
+
+            # get rid of the RAM overhead
+            del session
+
+        #pd.DataFrame({'zeroth_sample_num': self.zeroth_sample_number[0]}).to_csv(self.analysis_path / 'zeroth_sample_num.csv')
+        print('got it!')
