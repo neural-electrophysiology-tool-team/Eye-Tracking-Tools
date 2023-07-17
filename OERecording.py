@@ -102,11 +102,135 @@ class OERecording:
                                      ('.continuous' in str(i)) & ('AUX' not in str(i)) & ('ADC' not in str(i))],
                                     key=lambda x: self.extract_number_from_file(x, suffix='continuous'))
 
-        self.analog_files = sorted([i.name for i in oe_metadata_file_path.parent.iterdir() if
-                                    ('AUX' in str(i)) or ('ADC' in str(i))],
+        self.analog_files = sorted([i.name for i in oe_metadata_file_path.parent.iterdir() if 'ADC' in str(i)],
                                    key=lambda x: self.extract_number_from_file(x, suffix='continuous'))
+        self.accel_files = sorted([i.name for i in oe_metadata_file_path.parent.iterdir() if ('AUX' in str(i))],
+                                  key=lambda x: self.extract_number_from_file(x, suffix='continuous'))
 
     def get_data(self, channels, start_time_ms, window_ms, convert_to_mv=True, return_timestamps=True):
+        """
+        This is a translated matlab function that efficiently retrieves data from Open-Ephys format neural recordings
+        :param self: an OERecording class obj. with a metadata file created by the matlab class with the same name
+        :param channels: a vector of channel numbers to sample from [1XN channels]
+        :param start_time_ms: a vector of window start times [1XN] in ms
+        :param window_ms: a single value, the length of the sampling window from each startTime [ms_value]
+        :param convert_to_mv: when True, turns the output into the mV representation of the sampled data
+        :param return_timestamps: when True, the output will include sample timestamps from 0 in ms
+        :return: data_matrix - an array with the shape [n_channels, n_windows, nSamples] with int16 / mV values
+        """
+        window_samples = int(
+            np.round(window_ms / self.sample_ms))  # round the time in ms to the nearest whole sample count
+        n_windows = len(start_time_ms)  # get the number of start times provided
+        start_time_ms = np.round(
+            start_time_ms / self.sample_ms) * self.sample_ms  # round the start times to the nearest whole sample step
+        window_ms = window_samples * self.sample_ms  # get the ms based length of the rounded window
+
+        # deal with the channel numbers:
+        if len(channels) == 0 or channels is None:  # if no channels were provided
+            channels = self.channelNumbers
+
+        if not all([c in self.channelNumbers for c in channels]):  # if requested channels do not exist in the file
+            raise ValueError('one or more of the entered channels does not exist in the recording!')
+        n_ch = len(channels)
+
+        # initialize some variables for the data extraction:
+        # waveform matrix:
+        data_matrix = np.zeros(shape=(int(window_samples), n_windows, n_ch),
+                               dtype=self.blkCont['Types'][3],
+                               order='F')
+        # List to store the record indices for waveform extraction:
+        p_rec_idx = []
+        # List to store the indices where reading from the file should start (one per reading window):
+        read_start_indices = []
+        records_per_trial_list = []
+        for i in range(n_windows):
+            # find the relevant record blocks in the block list:
+            p_single_trial_time_stamps = np.where((self.allTimeStamps[0] >= (start_time_ms[0][i] - self.recordLength)) &
+                                                  (self.allTimeStamps[0] < (start_time_ms[0][i] + window_ms)))[1]
+            try:
+                # this collects the indices to start reading from
+                read_start_indices.append(p_single_trial_time_stamps[0])
+            except IndexError:
+                print('hi')
+                read_start_indices.append(p_single_trial_time_stamps)
+
+            # Calculate time stamps in milliseconds based on sampling freq & record block length
+            single_trial_time_stamps = np.round(self.allTimeStamps[0][
+                                                    p_single_trial_time_stamps] / self.sample_ms) * self.sample_ms
+            # Get the number of records per trial & append to a list
+            records_per_trial = len(single_trial_time_stamps[0])
+            records_per_trial_list.append(records_per_trial)
+
+            # get the real time values for each sample index:
+            time_idx = np.tile((np.arange(self.dataSamplesPerRecord) * self.sample_ms).reshape(-1, 1),
+                               (1, records_per_trial)) + single_trial_time_stamps.reshape(1, -1)
+            # Find time indices within the requested time window
+            # (chunks are 1024 in size so they are usually cut for most time windows, result is as a boolean matrix)
+            p_rec_idx.append((time_idx >= start_time_ms[0][i]) & (time_idx < (start_time_ms[0][i] + window_ms)))
+
+            # Due to rounding issues, there may be an error when there is one sample too much -
+            # in this case the last sample is removed
+            if np.sum(p_rec_idx[i]) == window_samples + 1:
+                print(f'sample removed for window #{i}')
+                p_rec_idx[i][0, np.where(p_rec_idx[i][0, :] == 1)[0][0]] = False
+
+        p_rec_idx = np.hstack(p_rec_idx)  # Concatenate record indices into a single array
+
+        # now for the data extraction itself:
+        for i in range(n_ch):  # iterate over channels
+            data = np.zeros(p_rec_idx.shape, dtype=np.dtype('>i2'))  # Initialize the data array for a specific channel
+            curr_rec = 0  # for this channel, initialize the record counter
+            c_file = self.oe_file_path / self.channel_files[channels[i] - 1]  # get path of current channel file
+            with open(c_file, 'rb') as fid:  # open the file such that it will close when left alone
+                for j in range(n_windows):  # Iterate over sampling windows
+                    # use seek to go to the appropriate position in the file
+                    fid.seek(int(self.headerSizeByte + (read_start_indices[j] * self.bytesPerRecCont) + np.sum(
+                        self.blkBytesCont[0:3])), 0)
+                    # calculate the skip size, cut in half because each int16 is 2 bytes and the matlab
+                    # function takes bytes as skip (which fromfile does not, uniform datatype)
+                    skip_size = int(self.bytesPerRecCont[0][0] - self.blkBytesCont[3][0]) // 2
+                    read_size = self.dataSamplesPerRecord
+                    # calculate total element count to read:
+                    total_bytes = (read_size + skip_size) * records_per_trial_list[j]
+                    # read data from file in a single vector, including skip_data:
+                    # (Notice datatype is non-flexible in this version of the function!!!)
+                    data_plus_breaks = np.fromfile(fid, dtype=np.dtype('>i2'), count=total_bytes, sep='')
+                    # reshape into an array with a column-per-record shape:
+                    data_plus_breaks = data_plus_breaks.reshape(int(records_per_trial_list[j]), read_size + skip_size)
+                    # slice the array to get rid of the skip_data at the end of each column (record):
+                    clean_data = data_plus_breaks[:, : read_size]
+                    # transpose and store the current_rec data:
+                    data[:, curr_rec: curr_rec + records_per_trial_list[j]] = clean_data.T
+                    curr_rec = curr_rec + records_per_trial_list[j]  # move forward to the next reading window
+            # this loop exit closes the current channel file
+            # vectorize the data from the channel and perform a boolean snipping of non-window samples:
+            data_vec = data.T[p_rec_idx.T]
+
+            # put the data in the final data_matrix waveform matrix:
+            # check for end-of-recording exceedance :
+            if len(data_vec) < int(window_samples) * n_windows:
+                print(f'The requested data segment between {read_start_indices [j]} ms and '
+                      f'{read_start_indices[j] + window_ms} ms exceeds the recording length, '
+                      f'and will be 0-padded to fit the other windows')
+                num_zeros = (int(window_samples) * n_windows) - len(data_vec)
+                data_vec = np.pad(data_vec,(0, num_zeros), mode='constant')
+            data_matrix[:, :, i] = data_vec.reshape(int(window_samples), n_windows, order='F')
+
+        data_matrix = np.transpose(data_matrix, [2, 1, 0])
+
+        if convert_to_mv:
+            data_matrix = data_matrix * self.MicrovoltsPerAD[0]
+
+        if return_timestamps:
+            timestamps = np.tile(np.arange(window_samples) * self.sample_ms, (n_windows, 1))
+            start_times = np.tile(start_time_ms.T, window_samples)
+            timestamps = timestamps + start_times
+            return data_matrix, timestamps
+        else:
+            return data_matrix
+
+
+    def get_analog_data(self, channels, start_time_ms, window_ms, convert_to_mv=True, return_timestamps=True):
         """
         This is a translated matlab function that efficiently retrieves data from Open-Ephys format neural recordings
         :param self: an OERecording class obj. with a metadata file created by the matlab class with the same name

@@ -15,7 +15,8 @@ from ellipse import LsqEllipse
 from lxml import etree
 from scipy import signal
 from tqdm import tqdm
-from OERecording import *
+import pickle
+from OERecording import OERecording
 
 '''
 This script defines the BlockSync class which takes all of the relevant data for a given trial and can be utilized
@@ -386,8 +387,85 @@ class BlockSync:
         self.re_videos = [vid for vid in glob.glob(str(self.block_path) + r'\eye_videos\RE\**\*.mp4') if
                           "DLC" not in vid]
 
+    def get_eye_brightness_vectors(self, threshold_value=30, export=True):
+        """
+        This is a utility function that generates the eye brightness vectors for later synchronization
+        This step should be performed by a long looper over all data before synchronization
+        :param threshold_value: The threshold value to use as mask before claculating brightness
+        :param export: if true will export the vectors into two .csv files
+        :return: /
+        """
+        print(f'getting eye brigtness values for block {self.block_num}...')
+        if self.le_videos is None:
+            self.le_videos = [vid for vid in glob.glob(str(self.block_path) + r'\eye_videos\LE\**\*.mp4') if
+                              "DLC" not in vid]
+        if self.re_videos is None:
+            self.re_videos = [vid for vid in glob.glob(str(self.block_path) + r'\eye_videos\RE\**\*.mp4') if
+                              "DLC" not in vid]
+        p = self.analysis_path / 'eye_brightness_values_dict.pkl'
+        if p.is_file():
+            print('found a file!')
+            with open(self.analysis_path / 'eye_brightness_values_dict.pkl', 'rb') as file:
+                eye_brightness_dict = pickle.load(file)
+                if self.le_frame_val_list is None:
+                    self.le_frame_val_list = eye_brightness_dict['left_eye']
+                if self.re_frame_val_list is None:
+                    self.re_frame_val_list = eye_brightness_dict['right_eye']
+        else:
+            print()
+            answer = input('no file exists, want to make it? (no / any other answer)')
+            if answer == 'no':
+                return
+            self.le_frame_val_list = self.produce_frame_val_list(self.le_videos, threshold_value=threshold_value)
+            self.re_frame_val_list = self.produce_frame_val_list(self.re_videos, threshold_value=threshold_value)
+            if export:
+                export_path = p
+                frame_val_dict = {
+
+                    'left_eye':self.le_frame_val_list,
+                    'right_eye': self.re_frame_val_list
+                }
+
+                with open(export_path, 'wb') as file:
+                    pickle.dump(frame_val_dict, file)
+
+    def load_eye_brightness_vectors(self, threshold_value=30, export=True):
+        """
+        This is a utility function that generates the eye brightness vectors for later synchronization
+        This step should be performed by a long looper over all data before synchronization
+        :param threshold_value: The threshold value to use as mask before claculating brightness
+        :param export: if true will export the vectors into two .csv files
+        :return: /
+        """
+        with open(self.analysis_path / 'eye_brightness_values_dict.pkl', 'rb') as file:
+            eye_brightness_dict = pickle.load(file)
+
+        if self.le_videos is None:
+            self.le_videos = [vid for vid in glob.glob(str(self.block_path) + r'\eye_videos\LE\**\*.mp4') if
+                              "DLC" not in vid]
+        if self.re_videos is None:
+            self.re_videos = [vid for vid in glob.glob(str(self.block_path) + r'\eye_videos\RE\**\*.mp4') if
+                              "DLC" not in vid]
+        if self.le_frame_val_list is None:
+            self.le_frame_val_list = eye_brightness_dict['left_eye']
+        if self.re_frame_val_list is None:
+            self.re_frame_val_list = eye_brightness_dict['right_eye']
+
+
+        if export:
+            export_path = self.analysis_path / 'eye_brightness_values_dict.pkl'
+            frame_val_dict = {
+
+                'left_eye': self.le_frame_val_list,
+                'right_eye': self.re_frame_val_list
+            }
+
+            with open(export_path, 'wb') as file:
+                pickle.dump(frame_val_dict, file)
+
     @staticmethod
-    def oe_events_parser(open_ephys_csv_path, channel_names, arena_channel_name='Arena_TTL', export_path=None):
+    def oe_events_parser(open_ephys_csv_path, channel_names, arena_channel_name='Arena_TTL', export_path=None,
+                         auto_break_selection=False):
         """
 
         :param open_ephys_csv_path: The path to an open ephys analysis tools exported csv
@@ -422,12 +500,16 @@ class BlockSync:
                     diff_mode = stats.mode(diff_series)[0][0]
                     arena_start_stop = np.where(diff_series > 10 * diff_mode)[0]
                     if len(arena_start_stop) != 2:
-                        start_ind = input(f'there is some kind of problem because '
-                                          f'there should be 2 breaks in the arena TTLs'
-                                          f'and there are {len(arena_start_stop)}, those indices are: '
-                                          f'{[s.iloc[i] for i in arena_start_stop]}... '
-                                          f'choose the index to use as startpoint:')
-                        end_ind = input('choose the index to use as endpoint:')
+                        if auto_break_selection is not False:
+                            start_ind = auto_break_selection[0]
+                            end_ind = auto_break_selection[1]
+                        else:
+                            start_ind = input(f'there is some kind of problem because '
+                                              f'there should be 2 breaks in the arena TTLs'
+                                              f'and there are {len(arena_start_stop)}, those indices are: '
+                                              f'{[s.iloc[i] for i in arena_start_stop]}... '
+                                              f'choose the index to use as startpoint:')
+                            end_ind = input('choose the index to use as endpoint:')
                         arena_start_timestamp = s.iloc[arena_start_stop[int(start_ind)] + 1]
                         print(f'arena first frame timestamp: {arena_start_timestamp}')
                         arena_end_timestamp = s.iloc[arena_start_stop[int(end_ind)]]
@@ -459,29 +541,35 @@ class BlockSync:
 
         return open_ephys_events, arena_start_timestamp, arena_end_timestamp
 
-    def parse_open_ephys_events(self, align_to_zero=True):
+    def parse_open_ephys_events(self, align_to_zero=True, auto_break_selection=False, arena_channel_name='Arena_TTL'):
         """
         Gets the sample rate from the settings.xml file
         Creates the parsed_events.csv file
         finds the first and last frame timestamps for each video source
 
         """
-        print('running parse_open_ephys_events...')
-        # First, create the events.csv file:
-        self.oe_events_to_csv(align_to_zero=align_to_zero)
-        # understand the samplerate and the first timestamp
-        # if self.sample_rate is None:
-        #     self.get_sample_rate()
-        # session = oea.Session(str(self.oe_path))
-        # self.first_oe_timestamp = session.recordings[0].continuous[0].timestamps[0]
-        # parse the events of the open-ephys recording
 
-        ex_path = self.block_path / rf'oe_files' / self.exp_date_time / 'parsed_events.csv'
-        self.oe_events, self.arena_vid_first_t, self.arena_vid_last_t = self.oe_events_parser(
-            self.block_path / rf'oe_files' / self.exp_date_time / 'events.csv',
-            self.channeldict,
-            export_path=ex_path)
-        print(f'created {ex_path}')
+        print('running parse_open_ephys_events...')
+        if (self.oe_path.parent / 'parsed_events.csv').is_file():
+            print(f'block {self.block_num} has a parsed events file, reading...')
+            self.oe_events = pd.read_csv(str((self.oe_path.parent / 'parsed_events.csv')), index_col=0)
+            self.arena_vid_first_t = \
+                self.oe_events[self.oe_events[str(arena_channel_name + '_frame')] == 0]['Arena_TTL'].values[0]
+
+            last_frame = np.nanmax(self.oe_events[str(arena_channel_name + '_frame')].values)
+            self.arena_vid_last_t = \
+                self.oe_events[self.oe_events[str(arena_channel_name + '_frame')] == last_frame]['Arena_TTL'].values[0]
+        else:
+            # First, create the events.csv file:
+            self.oe_events_to_csv(align_to_zero=align_to_zero)
+
+            # Now work on the parsed_events file and expoert it
+            ex_path = self.block_path / rf'oe_files' / self.exp_date_time / 'parsed_events.csv'
+            self.oe_events, self.arena_vid_first_t, self.arena_vid_last_t = self.oe_events_parser(
+                self.block_path / rf'oe_files' / self.exp_date_time / 'events.csv',
+                self.channeldict,
+                export_path=ex_path, auto_break_selection=auto_break_selection)
+            print(f'created {ex_path}')
         self.l_vid_first_t = self.oe_events['R_eye_TTL'].loc[self.oe_events['R_eye_TTL_frame'].idxmin()]
         self.l_vid_last_t = self.oe_events['R_eye_TTL'].loc[self.oe_events['R_eye_TTL_frame'].idxmax()]
         self.r_vid_first_t = self.oe_events['L_eye_TTL'].loc[self.oe_events['L_eye_TTL_frame'].idxmin()]
