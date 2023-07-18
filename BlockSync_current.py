@@ -344,9 +344,10 @@ class BlockSync:
         print('handling eye video files')
         eye_vid_path = self.block_path / 'eye_videos'
         print('converting videos...')
-        files_to_convert = \
-            [file for file in glob.glob(str(eye_vid_path) + r'\**\*.h264', recursive=True) if 'DLC' not in file]
-        converted_files = glob.glob(str(eye_vid_path) + r'\**\*.mp4', recursive=True)
+        files_to_convert = [
+            file for file in eye_vid_path.rglob('*.h264') if 'DLC' not in str(file)
+        ]
+        converted_files = [file for file in eye_vid_path.rglob('*.mp4') if 'DLC' not in str(file)]
         print(f'converting files: {files_to_convert}')
         if len(files_to_convert) == 0:
             print('found no eye videos to handle...')
@@ -364,9 +365,9 @@ class BlockSync:
                 print(f'The file {file[:-5]}.mp4 already exists, no conversion necessary')
         print('Validating videos...')
         videos_to_inspect = \
-            [file for file in glob.glob(str(eye_vid_path) + r'\**\*.mp4', recursive=True) if 'DLC' not in file]
+            [file for file in eye_vid_path.rglob('*.mp4') if 'DLC' not in file]
         timestamps_to_inspect = \
-            [file for file in glob.glob(str(eye_vid_path) + r'\**\*.csv', recursive=True) if 'DLC' not in file]
+            [file for file in eye_vid_path.rglob('*.csv') if 'DLC' not in file]
         for vid in range(len(videos_to_inspect)):
             timestamps = pd.read_csv(timestamps_to_inspect[vid])
             num_reported = timestamps.shape[0]
@@ -1131,65 +1132,33 @@ class BlockSync:
         """
         Method to read and analyze the dlc files and fit ellipses to create the le/re ellipses attributes of the block
         """
+        # if the dataframes already exist, read them
         if (self.analysis_path / 're_df.csv').exists() and (self.analysis_path / 'le_df.csv').exists():
-            self.re_df = pd.read_csv(self.analysis_path / 're_df.csv')
+            self.re_df = pd.read_csv(self.analysis_path / 're_df.csv', index_col=0)
+            self.le_df = pd.read_csv(self.analysis_path / 'le_df.csv', index_col=0)
+            # append ms_axis to df
             self.re_df['ms_axis'] = self.ms_axis
-            if 'Unnamed: 0' in self.re_df.columns:
-                self.re_df = self.re_df.drop(axis=1, labels='Unnamed: 0')
-            self.le_df = pd.read_csv(self.analysis_path / 'le_df.csv')
             self.le_df['ms_axis'] = self.ms_axis
-            if 'Unnamed: 0' in self.le_df.columns:
-                self.le_df = self.le_df.drop(axis=1, labels='Unnamed: 0')
             print('eye dataframes loaded from analysis folder')
             return
 
+        # find the dlc files
         pl = [i for i in os.listdir(self.l_e_path) if 'DLC' in i and '.csv' in i][0]
         self.le_csv = pd.read_csv(self.l_e_path / pl, header=1)
         pr = [i for i in os.listdir(self.r_e_path) if 'DLC' in i and '.csv' in i][0]
         self.re_csv = pd.read_csv(self.r_e_path / pr, header=1)
+
+        # perform eye tracking analysis for each eye frame
         self.le_ellipses = self.eye_tracking_analysis(self.le_csv, threshold_to_use)
         self.re_ellipses = self.eye_tracking_analysis(self.re_csv, threshold_to_use)
 
+        # get the frame-timestamp relationship for each video
         self.le_df = self.final_sync_df.drop(labels=['Arena_frame', 'R_eye_frame'], axis=1)
-        for column in list(self.le_ellipses.columns):
-            self.le_df.insert(loc=len(self.le_df.columns), column=column, value=None)
         self.re_df = self.final_sync_df.drop(labels=['Arena_frame', 'L_eye_frame'], axis=1)
-        for column in list(self.re_ellipses.columns):
-            self.re_df.insert(loc=len(self.re_df.columns), column=column, value=None)
-        print('populating le_df')
-        for row in tqdm(self.le_df.index):
-            try:
-                frame = self.le_df['L_eye_frame'].loc[row]
-                if frame == frame:
-                    frame = int(frame)
-                    self.le_df.loc[row, 'center_x'] = self.le_ellipses.iloc[frame]['center_x']
-                    self.le_df.loc[row, 'center_y'] = self.le_ellipses.iloc[frame]['center_y']
-                    self.le_df.loc[row, 'width'] = self.le_ellipses.width[frame]
-                    self.le_df.loc[row, 'height'] = self.le_ellipses.height[frame]
-                    self.le_df.loc[row, 'phi'] = self.le_ellipses.phi[frame]
-                    self.le_df.loc[row, 'ellipse_size'] = self.le_ellipses.ellipse_size[frame]
-            except IndexError:
-                print(f'Tried to match frame {row} but there is no frame with this index')
-                continue
-            # le_df.at[row, 'rostral_edge'] = le_ellipses.rostral_edge[frame]
-            # le_df.at[row, 'caudal_edge'] = le_ellipses.caudal_edge[frame]
-        print('populating re_video_sync_df')
-        for row in tqdm(self.re_df.index):
-            try:
-                frame = self.re_df['R_eye_frame'].loc[row]
-                if frame == frame:
-                    frame = int(frame)
-                    self.re_df.loc[row, 'center_x'] = self.re_ellipses.iloc[frame]['center_x']
-                    self.re_df.loc[row, 'center_y'] = self.re_ellipses.iloc[frame]['center_y']
-                    self.re_df.loc[row, 'width'] = self.re_ellipses.width[frame]
-                    self.re_df.loc[row, 'height'] = self.re_ellipses.height[frame]
-                    self.re_df.loc[row, 'phi'] = self.re_ellipses.phi[frame]
-                    self.re_df.loc[row, 'ellipse_size'] = self.re_ellipses.ellipse_size[frame]
-            except IndexError:
-                print(f'Tried to match frame {frame} but there is no frame with this index')
-                continue
-            # re_video_sync_df.at[row, 'rostral_edge'] = re_ellipses.rostral_edge[frame]
-            # re_video_sync_df.at[row, 'caudal_edge'] = re_ellipses.caudal_edge[frame]
+
+        # use frame numbers as the hooks to merge data and frame-timestamp relationships
+        self.le_df = self.le_df.merge(self.le_ellipses, left_on='L_eye_frame', right_index=True, how='left')
+        self.re_df = self.re_df.merge(self.re_ellipses, left_on='R_eye_frame', right_index=True, how='left')
         self.re_df['ms_axis'] = self.ms_axis
         self.le_df['ms_axis'] = self.ms_axis
         print('done')
