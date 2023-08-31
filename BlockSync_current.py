@@ -1,4 +1,5 @@
 import glob
+import h5py
 import math
 import os
 import pathlib
@@ -17,6 +18,7 @@ from scipy import signal
 from tqdm import tqdm
 import pickle
 from OERecording import OERecording
+import scipy.signal as sig
 
 '''
 This script defines the BlockSync class which takes all of the relevant data for a given trial and can be utilized
@@ -192,6 +194,11 @@ class BlockSync:
         self.eye_diff_mode = None
         self.zeroth_sample_number = None
         self.get_zeroth_sample_number()
+        self.saccade_dict = None
+        self.synced_saccades_dict = None
+        self.non_synced_saccades_dict = None
+        self.non_synced_saccades_df = None
+        self.synced_saccades_df = None
 
     def __str__(self):
         return str(f'{self.animal_call}, block {self.block_num}, on {self.exp_date_time}')
@@ -414,7 +421,7 @@ class BlockSync:
                     self.re_frame_val_list = eye_brightness_dict['right_eye']
         else:
             print()
-            answer = input('no file exists, want to make it? (no / any other answer)')
+            answer = input('no eye brigtness file exists, want to make it? (no / any other answer)')
             if answer == 'no':
                 return
             self.le_frame_val_list = self.produce_frame_val_list(self.le_videos, threshold_value=threshold_value)
@@ -1008,13 +1015,18 @@ class BlockSync:
                        'right': r_rising}
         return dict_rising
 
-    def full_sync_verification(self, with_arena=True):
+    def full_sync_verification(self, ms_axis=True, with_arena=True):
         """
         Run this step before "export_manual_sync_df" to view the synchronization of the arena in relation to eyes,
         if further movements are necessary use "Move_eye_sync_manual" and run again -
         only export when this step gives a synchronized plot
         """
-        x_axis = self.manual_sync_df.index
+        if ms_axis:
+            x_axis = self.manual_sync_df['Arena_TTL'] / 20
+            x_axis_label = 'Milliseconds'
+        else:
+            x_axis = self.manual_sync_df.index
+            x_axis_label = 'Frame count (from arena first frame)'
         bokeh_fig = figure(title=f'self Number {self.block_num} Full Synchronization Verification',
                            x_axis_label='Frame',
                            y_axis_label='Brightness Z_Score',
@@ -1053,7 +1065,7 @@ class BlockSync:
                 self.ms_axis = (self.final_sync_df['Arena_TTL'].values -
                                 self.final_sync_df['Arena_TTL'].values[0]) / (self.sample_rate / 1000)
         except FileNotFoundError:
-            print('there is no manual sync file, manually sync the block')
+            print(f'there is no manual sync file for block {self.block_num}, manually sync the block')
 
     @staticmethod
     def eye_tracking_analysis(dlc_video_analysis_csv, uncertainty_thr):
@@ -1125,7 +1137,7 @@ class BlockSync:
         ellipse_df['ellipse_size'] = ellipse_size_per_frame
         # ellipse_df['rostral_edge'] = rostral_edge_ls
         # ellipse_df['caudal_edge'] = caudal_edge_ls
-        print('\n Done')
+        print(f'\n ellipses calc complete')
         return ellipse_df
 
     def read_dlc_data(self, threshold_to_use=0.999, export=True):
@@ -1137,8 +1149,8 @@ class BlockSync:
             self.re_df = pd.read_csv(self.analysis_path / 're_df.csv', index_col=0)
             self.le_df = pd.read_csv(self.analysis_path / 'le_df.csv', index_col=0)
             # append ms_axis to df
-            self.re_df['ms_axis'] = self.ms_axis
-            self.le_df['ms_axis'] = self.ms_axis
+            self.re_df['ms_axis'] = self.re_df['Arena_TTL'] / 20
+            self.le_df['ms_axis'] = self.le_df['Arena_TTL'] / 20
             print('eye dataframes loaded from analysis folder')
             return
 
@@ -1159,9 +1171,9 @@ class BlockSync:
         # use frame numbers as the hooks to merge data and frame-timestamp relationships
         self.le_df = self.le_df.merge(self.le_ellipses, left_on='L_eye_frame', right_index=True, how='left')
         self.re_df = self.re_df.merge(self.re_ellipses, left_on='R_eye_frame', right_index=True, how='left')
-        self.re_df['ms_axis'] = self.ms_axis
-        self.le_df['ms_axis'] = self.ms_axis
-        print('done')
+        self.re_df['ms_axis'] = self.re_df['Arena_TTL'] / 20
+        self.le_df['ms_axis'] = self.le_df['Arena_TTL'] / 20
+        print('created le / re dataframes')
 
         if export:
             print('exporting to analysis folder')
@@ -1248,7 +1260,7 @@ class BlockSync:
                    line_color='red')
         show(b_fig)
 
-    def saccade_event_analayzer(self, threshold=2, automatic=False):
+    def saccade_event_analayzer(self, threshold=2, automatic=False, overwrite=False):
         """
         This method first finds the speed of the pupil in each frame, then detects saccade events
         :param automatic: when set to true, will go with the given threshold and not prompt the user for input,
@@ -1261,7 +1273,8 @@ class BlockSync:
         self.pupil_speed_calc()
 
         # now check if the anlaysis was already performed:
-        if (self.analysis_path / 'r_saccades.csv').exists() and (self.analysis_path / 'l_saccades.csv').exists():
+        if (self.analysis_path / 'r_saccades.csv').exists() and (self.analysis_path / 'l_saccades.csv').exists()\
+                and (overwrite is False):
             self.r_saccades_chunked = pd.read_csv(self.analysis_path / 'r_saccades.csv')
             self.l_saccades_chunked = pd.read_csv(self.analysis_path / 'l_saccades.csv')
             if 'Unnamed: 0' in self.r_saccades_chunked.columns:
@@ -1445,6 +1458,332 @@ class BlockSync:
 
             # get rid of the RAM overhead
             del session
-
-        #pd.DataFrame({'zeroth_sample_num': self.zeroth_sample_number[0]}).to_csv(self.analysis_path / 'zeroth_sample_num.csv')
         print('got it!')
+
+    # TODO build a function that creates an internal, fully populated saccade dataframe with the same parameters as
+    #  multi_block_saccade_dict_creation_current but get all of the following notebook steps in as-well
+    @staticmethod
+    def nan_helper(y):
+        """Helper to handle indices and logical indices of NaNs.
+
+        Input:
+            - y, 1d numpy array with possible NaNs
+        Output:
+            - nans, logical indices of NaNs
+            - index, a function, with signature indices= index(logical_indices),
+              to convert logical indices of NaNs to 'equivalent' indices
+        """
+        return np.isnan(y), lambda z: z.nonzero()[0]
+
+    def parse_dataset_to_df(self, saccade_dict):
+
+        df = pd.DataFrame(
+            columns=['datetime', 'block', 'eye', 'timestamps', 'fs', 'pxx', 'samples', 'x_coords', 'y_coords',
+                     'vid_inds', 'x_speed', 'y_speed', 'magnitude', 'dx', 'dy', 'direction', 'accel'])
+
+        index_counter = 0
+
+        block = saccade_dict  # in a certain block
+        for e in block.keys():
+            eye = block[e]  # in one of the eyes
+            for row in range(len(eye['samples'])):  # for each saccade
+                df.at[index_counter, 'datetime'] = self.exp_date_time
+                df.at[index_counter, 'block'] = self.block_num
+                df.at[index_counter, 'eye'] = e
+                for col in eye.keys():  # for each columm
+                    v = eye[col][row]  # get value of location
+                    df.at[index_counter, col] = v
+
+
+                print(index_counter, end='\r', flush=True)
+                index_counter += 1
+
+        print(f'done, dataframe contains {index_counter} saccades')
+        return df
+
+    def saccade_dict_creation(self, sampling_window_ms, ep_channel_number,
+                              automate_saccade_detection=True, overwrite_saccade_data=False):
+        """
+        This function cascades over the steps that end in two dataframe objects, one for synced saccades and the other
+        non-synced saccades. This function requires completion of all previous analysis steps (in particular, lizMov.mat
+        should be produced using mark's code)
+        :param sampling_window_ms: the time window for each saccade (half before half after the saccade)
+        :param ep_channel_number: a channel to get neural data from, limited to 1 for now (you can use get_data to
+        draw additional channels based on timestamps from the dataframe later
+        :return:
+        """
+        # collect accelerometer data
+        # path definition
+        p = self.oe_path / 'analysis'
+        analysis_list = os.listdir(p)
+        correct_analysis = [i for i in analysis_list if self.animal_call in i][0]
+        p = p / str(correct_analysis)
+        matPath = p / 'lizMov.mat'
+        print(f'path to mat file is {matPath}')
+        # read mat file
+        mat_data = h5py.File(str(matPath), 'r')
+        mat_dict = {'t_mov_ms': mat_data['t_mov_ms'][:],
+                    'movAll': mat_data['movAll'][:]}
+
+        acc_df = pd.DataFrame(data=np.array([mat_dict['t_mov_ms'][:, 0], mat_dict['movAll'][:, 0]]).T,
+                              columns=['t_mov_ms', 'movAll'])
+        mat_data.close()
+
+        self.saccade_event_analayzer(automatic=automate_saccade_detection,
+                                     overwrite=overwrite_saccade_data,
+                                     threshold=2)
+
+        # create the top-level block dict object
+        self.saccade_dict = {
+            'L': {},
+            'R': {}
+        }
+
+        # create and populate the internal dictionaries (for each eye)
+        for i, e in enumerate(['L', 'R']):
+            # get the correct saccades_chunked object and eye_df
+            saccades_chunked = [self.l_saccades_chunked, self.r_saccades_chunked][i]
+            eye_df = [self.le_df, self.re_df][i]
+            saccades = saccades_chunked[saccades_chunked.saccade_length_frames > 0]
+            saccade_times = np.sort(saccades.saccade_start_ms.values)
+            ep_channel_numbers = [ep_channel_number]
+            pre_saccade_ts = saccade_times - (sampling_window_ms / 2)  #
+
+            # get the data of the relevant saccade time windows:
+            print(f"getting data with block_number {self.block_num}: \n"
+                  f"There are {len(pre_saccade_ts)} saccade events: \n"
+                  f"pre_saccade_ts = {pre_saccade_ts}"
+                  f"")
+            ep_data, ep_timestamps = self.oe_rec.get_data(ep_channel_numbers,
+                                                          pre_saccade_ts,
+                                                          sampling_window_ms,
+                                                          convert_to_mv=True)  # data [n_channels, n_windows, nSamples]
+
+            # start populating the dictionary
+            self.saccade_dict[e] = {
+                "timestamps": [],
+                "fs": [],
+                "pxx": [],
+                "samples": [],
+                "x_coords": [],
+                "y_coords": [],
+                "vid_inds": [],
+                "accel": []
+            }
+
+            # go saccade by saccade
+            for j in range(len(pre_saccade_ts)):
+                # get specific saccade samples:
+                saccade_samples = ep_data[0, j, :]  # [n_channels, n_windows, nSamples]
+                # get the spectral profile for the segment
+                fs, pxx = sig.welch(saccade_samples, self.sample_rate, nperseg=16384, return_onesided=True)
+
+                j0 = pre_saccade_ts[j]
+                j1 = pre_saccade_ts[j] + sampling_window_ms
+                s_df = eye_df.query("ms_axis >= @j0 and ms_axis <= @j1")
+                x_coords = s_df['center_x'].values
+                y_coords = s_df['center_y'].values
+                vid_inds = np.array(s_df.Arena_TTL.values - s_df.Arena_TTL.values[0], dtype='int32')
+
+                # deal with missing datapoints in saccades:
+                interpolated_coords = []
+                bad_saccade = False
+                for y in [x_coords, y_coords]:
+                    nan_count = np.sum(np.isnan(y.astype(float)))
+                    if nan_count > 0:
+                        if nan_count < len(y) / 2:
+                            # print(f'saccade at ind {i} has {nan_count} nans, interpolating...')
+                            # find nan values in the vector
+                            nans, z = self.nan_helper(y.astype(float))
+                            # interpolate using the helper lambda function
+                            y[nans] = np.interp(z(nans), z(~nans), y[~nans].astype(float))
+                            # replace the interpolated values for the saccade
+                            interpolated_coords.append(y)
+                        else:
+                            print(f'too many nans at ind {j}, ({np.sum(np.isnan(y))}) - cannot interpolate properly',
+                                  end='\r', flush=True)
+                            bad_saccade = True
+                    else:
+                        interpolated_coords.append(y)
+
+                # get accelerometer data for the ms_based section:
+                # get_ms_segment
+                ms_segment = s_df['ms_axis']
+                s0 = ms_segment.iloc[0]
+                s1 = ms_segment.iloc[-1]
+                mov_mag = np.sum(acc_df.query('t_mov_ms > @s0 and t_mov_ms < @s1').movAll.values)
+
+                # remove bad saccades
+                if bad_saccade:
+                    continue
+                # append OK saccades
+                else:
+                    self.saccade_dict[e]['timestamps'].append(pre_saccade_ts[j])
+                    self.saccade_dict[e]['x_coords'].append(interpolated_coords[0])
+                    self.saccade_dict[e]['y_coords'].append(interpolated_coords[1])
+                    self.saccade_dict[e]['vid_inds'].append(vid_inds)
+                    self.saccade_dict[e]['fs'].append(fs)
+                    self.saccade_dict[e]['pxx'].append(pxx)
+                    self.saccade_dict[e]['samples'].append(saccade_samples)
+                    self.saccade_dict[e]['accel'].append(mov_mag)
+        print(f'block {self.block_num} saccade dict done')
+        self.sort_synced_saccades()
+
+    @staticmethod
+    def saccade_before_after(coords):
+        max_ind = np.argmax(coords)
+        min_ind = np.argmin(coords)
+        if max_ind < min_ind:
+            before = coords[max_ind]
+            after = coords[min_ind]
+        else:
+            before = coords[min_ind]
+            after = coords[max_ind]
+        delta = after - before
+        return before, after, delta
+
+    def sort_synced_saccades(self):
+        """
+        This function takes a saccades dictionary and returns two sorted dictionaries -
+        one with synced saccades, the other with non-synced saccades
+        :param b_dict:
+        :return:
+        """
+
+        b_dict = self.saccade_dict
+        # get the two timestamps vectors
+        l_times = np.array(b_dict['L']['timestamps'])
+        r_times = np.array(b_dict['R']['timestamps'])
+
+        # I want to collect the matching indices from the L and R dictionaries
+        # and create a "synced saccades dict" object
+        # that only has two-eyed saccades included in it...
+        # first, I have to understand which rows of the dictionaries go together:
+        # create a matrix of [left eye timestamp, -,left eye ind, -]
+        s_mat = np.empty([len(l_times), 5])
+        s_mat[:, 0] = l_times
+        s_mat[:, 2] = np.arange(0, len(l_times))
+        # find and fit the right eye times and indices on columns 1 and 3
+        for i, lt in enumerate(s_mat[:, 0]):
+            array = np.abs((r_times - lt))
+            ind_min_diff = np.argmin(array)
+            min_diff = array[ind_min_diff]
+            rt = r_times[ind_min_diff]
+            s_mat[i, 3] = ind_min_diff
+            s_mat[i, 1] = rt
+            s_mat[i, 4] = min_diff
+
+        # create a dataframe for queries and testing, define a threshold and remove non sync saccades
+        s_df = pd.DataFrame(s_mat, columns=['lt', 'rt', 'left_ind', 'right_ind', 'diff'])
+        threshold = 1400  # 70 ms to consider a saccade simultaneous
+        s_df = s_df.query('diff<@threshold')
+        ind_dict = {
+            'L': s_df['left_ind'].values,
+            'R': s_df['right_ind'].values
+        }
+
+        # create a synced dictionary for the block:
+        synced_b_dict = {
+            'L': {},
+            'R': {}
+        }
+        for e in ['L', 'R']:
+            inds = ind_dict[e].astype(int)
+            synced_b_dict[e] = {
+                "timestamps": np.array(b_dict[e]['timestamps'])[inds],
+                "fs": np.array(b_dict[e]['fs'])[inds],
+                "pxx": np.array(b_dict[e]['pxx'])[inds],
+                "samples": np.array(b_dict[e]['samples'])[inds],
+                "x_coords": np.array(b_dict[e]['x_coords'], dtype=object)[inds],
+                "y_coords": np.array(b_dict[e]['y_coords'], dtype=object)[inds],
+                "vid_inds": np.array(b_dict[e]['vid_inds'], dtype=object)[inds],
+                "accel": np.array(b_dict[e]['accel'])[inds]
+            }
+
+        non_sync_b_dict = {
+            'L': {},
+            'R': {}
+        }
+        for e in ['L', 'R']:
+            inds = ind_dict[e].astype(int)
+            logical = np.ones(len(b_dict[e]['timestamps'])).astype(np.bool)
+            logical[inds] = 0
+            non_sync_b_dict[e] = {
+                "timestamps": np.array(b_dict[e]['timestamps'])[logical],
+                "fs": np.array(b_dict[e]['fs'])[logical],
+                "pxx": np.array(b_dict[e]['pxx'])[logical],
+                "samples": np.array(b_dict[e]['samples'])[logical],
+                "x_coords": np.array(b_dict[e]['x_coords'], dtype=object)[logical],
+                "y_coords": np.array(b_dict[e]['y_coords'], dtype=object)[logical],
+                "vid_inds": np.array(b_dict[e]['vid_inds'], dtype=object)[logical],
+                "accel": np.array(b_dict[e]['accel'])[logical]
+            }
+        self.calibrate_pixel_size(10)
+        self.synced_saccades_dict = self.saccade_dict_enricher(synced_b_dict)
+        self.synced_saccades_df = self.parse_dataset_to_df(self.synced_saccades_dict)
+        # get a calibrated dx dy
+        self.synced_saccades_df['calib_dx'] = \
+            self.synced_saccades_df['dx'] * \
+            (self.synced_saccades_df['eye'].map({'R': self.R_pix_size, 'L': self.L_pix_size}))
+        self.synced_saccades_df['calib_dy'] = \
+            self.synced_saccades_df['dy'] * \
+            (self.synced_saccades_df['eye'].map({'R': self.R_pix_size, 'L': self.L_pix_size}))
+        
+        self.non_synced_saccades_dict = self.saccade_dict_enricher(non_sync_b_dict)
+        self.non_synced_saccades_df = self.parse_dataset_to_df(self.non_synced_saccades_dict)
+        self.non_synced_saccades_df['calib_dy'] = \
+            self.non_synced_saccades_df['dy'] * \
+            (self.non_synced_saccades_df['eye'].map({'R': self.R_pix_size, 'L': self.L_pix_size}))
+        self.non_synced_saccades_df['calib_dx'] = \
+            self.non_synced_saccades_df['dx'] * \
+            (self.non_synced_saccades_df['eye'].map({'R': self.R_pix_size, 'L': self.L_pix_size}))
+
+    def saccade_dict_enricher(self, saccade_dict):
+        """
+        Helper function to enrich saccade dictionary before arranging it into a dataframe
+        :param saccade_dict:
+        :return:
+        """
+
+        for e in ['L', 'R']:
+            saccade_dict[e]['x_speed'] = []
+            saccade_dict[e]['y_speed'] = []
+            saccade_dict[e]['magnitude'] = []
+            saccade_dict[e]['dx'] = []  # TEMP
+            saccade_dict[e]['dy'] = []  # TEMP
+            saccade_dict[e]['direction'] = []
+
+            for s in range(len(saccade_dict[e]['timestamps'])):
+                # speed:
+                saccade_dict[e]['x_speed'].append(np.insert(np.diff(saccade_dict[e]['x_coords'][s]), 0, float(0)))
+                saccade_dict[e]['y_speed'].append(np.insert(np.diff(saccade_dict[e]['y_coords'][s]), 0, float(0)))
+
+                # Understand directionality and magnitude:
+                # understand before and after
+                x_before, x_after, dx = self.saccade_before_after(saccade_dict[e]['x_coords'][s])
+                y_before, y_after, dy = self.saccade_before_after(saccade_dict[e]['y_coords'][s])
+
+                # calculate magnitude (euclidean)
+                s_mag = np.sqrt(dx ** 2 + dy ** 2)
+
+                # get direction quadrant
+                if dx > 0 and dy > 0:
+                    quad = 0
+                elif dx < 0 < dy:
+                    quad = 1
+                elif dx < 0 and dy < 0:
+                    quad = 2
+                elif dx > 0 > dy:
+                    quad = 3
+                # get direction (theta calculated from quadrent border)
+                degrees_in_quadrent = np.rad2deg(np.arctan(np.abs(dy) / np.abs(dx)))
+                theta = degrees_in_quadrent + (quad * 90)
+
+                # collect into dict
+                saccade_dict[e]['dx'].append(dx)
+                saccade_dict[e]['dy'].append(dy)
+                saccade_dict[e]['magnitude'].append(s_mag)
+                saccade_dict[e]['direction'].append(theta)
+
+        return saccade_dict
+

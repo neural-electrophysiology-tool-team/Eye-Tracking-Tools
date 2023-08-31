@@ -213,7 +213,7 @@ class OERecording:
                       f'{read_start_indices[j] + window_ms} ms exceeds the recording length, '
                       f'and will be 0-padded to fit the other windows')
                 num_zeros = (int(window_samples) * n_windows) - len(data_vec)
-                data_vec = np.pad(data_vec,(0, num_zeros), mode='constant')
+                data_vec = np.pad(data_vec, (0, num_zeros), mode='constant')
             data_matrix[:, :, i] = data_vec.reshape(int(window_samples), n_windows, order='F')
 
         data_matrix = np.transpose(data_matrix, [2, 1, 0])
@@ -228,7 +228,6 @@ class OERecording:
             return data_matrix, timestamps
         else:
             return data_matrix
-
 
     def get_analog_data(self, channels, start_time_ms, window_ms, convert_to_mv=True, return_timestamps=True):
         """
@@ -250,7 +249,7 @@ class OERecording:
 
         # deal with the channel numbers:
         if len(channels) == 0 or channels is None:  # if no channels were provided
-            channels = self.channelNumbers
+            channels = self.analogChannelNumbers
 
         if not all([c in self.channelNumbers for c in channels]):  # if requested channels do not exist in the file
             raise ValueError('one or more of the entered channels does not exist in the recording!')
@@ -303,7 +302,7 @@ class OERecording:
         for i in range(n_ch):  # iterate over channels
             data = np.zeros(p_rec_idx.shape, dtype=np.dtype('>i2'))  # Initialize the data array for a specific channel
             curr_rec = 0  # for this channel, initialize the record counter
-            c_file = self.oe_file_path / self.channel_files[channels[i] - 1]  # get path of current channel file
+            c_file = self.oe_file_path / self.analog_files[channels[i] - 1]  # get path of current channel file
             with open(c_file, 'rb') as fid:  # open the file such that it will close when left alone
                 for j in range(n_windows):  # Iterate over sampling windows
                     # use seek to go to the appropriate position in the file
@@ -342,7 +341,7 @@ class OERecording:
         data_matrix = np.transpose(data_matrix, [2, 1, 0])
 
         if convert_to_mv:
-            data_matrix = data_matrix * self.MicrovoltsPerAD[0]
+            data_matrix = data_matrix * self.MicrovoltsPerADAnalog[-1]
 
         if return_timestamps:
             timestamps = np.tile(np.arange(window_samples) * self.sample_ms, (n_windows, 1))

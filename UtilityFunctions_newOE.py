@@ -2,7 +2,7 @@ import numpy as np
 import pathlib
 import math
 import tqdm
-from  open_ephys import analysis as oea
+from open_ephys import analysis as oea
 import scipy.io
 from matplotlib import pyplot as plt
 from BlockSync_current import *
@@ -29,7 +29,7 @@ def nan_helper(y):
     return np.isnan(y), lambda z: z.nonzero()[0]
 
 
-def multi_block_saccade_dict_creation_current(blocklist, sampling_window_ms):
+def multi_block_saccade_dict_creation_current(blocklist, sampling_window_ms, ep_channel_number):
 
     saccade_dict = {}
     # loop over the blocks from here:
@@ -60,14 +60,14 @@ def multi_block_saccade_dict_creation_current(blocklist, sampling_window_ms):
         }
 
         # create and populate the internal dictionaries (for each eye)
-        for i, e in enumerate(['L','R']):
+        for i, e in enumerate(['L', 'R']):
             # get the correct saccades_chunked object and eye_df
-            saccades_chunked = [block.l_saccades_chunked,block.r_saccades_chunked][i]
-            eye_df = [block.le_df,block.re_df][i]
+            saccades_chunked = [block.l_saccades_chunked, block.r_saccades_chunked][i]
+            eye_df = [block.le_df, block.re_df][i]
             saccades = saccades_chunked[saccades_chunked.saccade_length_frames > 0]
             saccade_times = np.sort(saccades.saccade_start_ms.values)
-            ep_channel_numbers = [8]
-            pre_saccade_ts = saccade_times - (sampling_window_ms / 2) #
+            ep_channel_numbers = [ep_channel_number]
+            pre_saccade_ts = saccade_times - (sampling_window_ms / 2)
 
             # get the data of the relevant saccade time windows:
             print(f'calling get_data with the following inputs:'
@@ -181,45 +181,45 @@ def sort_synced_saccades(b_dict):
     threshold = 1400 # 70 ms to consider a saccade simultaneous
     s_df = s_df.query('diff<@threshold')
     ind_dict = {
-        'L':s_df['left_ind'].values,
-        'R':s_df['right_ind'].values
+        'L': s_df['left_ind'].values,
+        'R': s_df['right_ind'].values
     }
 
     # create a synced dictionary for the block:
     synced_b_dict = {
-        'L':{},
-        'R':{}
+        'L': {},
+        'R': {}
     }
-    for e in ['L','R']:
+    for e in ['L', 'R']:
         inds = ind_dict[e].astype(int)
         synced_b_dict[e] = {
-            "timestamps":np.array(b_dict[e]['timestamps'])[inds],
-            "fs":np.array(b_dict[e]['fs'])[inds],
-            "pxx":np.array(b_dict[e]['pxx'])[inds],
-            "samples":np.array(b_dict[e]['samples'])[inds],
-            "x_coords":np.array(b_dict[e]['x_coords'])[inds],
-            "y_coords":np.array(b_dict[e]['y_coords'])[inds],
-            "vid_inds":np.array(b_dict[e]['vid_inds'])[inds],
-            "accel":np.array(b_dict[e]['accel'])[inds]
+            "timestamps": np.array(b_dict[e]['timestamps'])[inds],
+            "fs": np.array(b_dict[e]['fs'])[inds],
+            "pxx": np.array(b_dict[e]['pxx'])[inds],
+            "samples": np.array(b_dict[e]['samples'])[inds],
+            "x_coords": np.array(b_dict[e]['x_coords'])[inds],
+            "y_coords": np.array(b_dict[e]['y_coords'])[inds],
+            "vid_inds": np.array(b_dict[e]['vid_inds'])[inds],
+            "accel": np.array(b_dict[e]['accel'])[inds]
         }
 
     non_sync_b_dict = {
-        'L':{},
-        'R':{}
+        'L': {},
+        'R': {}
     }
-    for e in ['L','R']:
+    for e in ['L', 'R']:
         inds = ind_dict[e].astype(int)
         logical = np.ones(len(b_dict[e]['timestamps'])).astype(np.bool)
         logical[inds] = 0
         non_sync_b_dict[e] = {
-            "timestamps":np.array(b_dict[e]['timestamps'])[logical],
-            "fs":np.array(b_dict[e]['fs'])[logical],
-            "pxx":np.array(b_dict[e]['pxx'])[logical],
-            "samples":np.array(b_dict[e]['samples'])[logical],
-            "x_coords":np.array(b_dict[e]['x_coords'])[logical],
-            "y_coords":np.array(b_dict[e]['y_coords'])[logical],
-            "vid_inds":np.array(b_dict[e]['vid_inds'])[logical],
-            "accel":np.array(b_dict[e]['accel'])[logical]
+            "timestamps": np.array(b_dict[e]['timestamps'])[logical],
+            "fs": np.array(b_dict[e]['fs'])[logical],
+            "pxx": np.array(b_dict[e]['pxx'])[logical],
+            "samples": np.array(b_dict[e]['samples'])[logical],
+            "x_coords": np.array(b_dict[e]['x_coords'])[logical],
+            "y_coords": np.array(b_dict[e]['y_coords'])[logical],
+            "vid_inds": np.array(b_dict[e]['vid_inds'])[logical],
+            "accel": np.array(b_dict[e]['accel'])[logical]
         }
     return synced_b_dict, non_sync_b_dict
 
@@ -240,20 +240,20 @@ def saccade_before_after(coords):
 def saccade_dict_enricher(saccade_dict):
     for k in saccade_dict.keys():
         sync_saccades = saccade_dict[k]
-        for e in ['L','R']:
+        for e in ['L', 'R']:
             sync_saccades[e]['x_speed'] = []
             sync_saccades[e]['y_speed'] = []
             sync_saccades[e]['magnitude'] = []
-            sync_saccades[e]['dx'] = [] # TEMP
-            sync_saccades[e]['dy'] = [] # TEMP
+            sync_saccades[e]['dx'] = []  # TEMP
+            sync_saccades[e]['dy'] = []  # TEMP
             sync_saccades[e]['direction'] = []
 
             for s in range(len(sync_saccades[e]['timestamps'])):
                 # speed:
-                sync_saccades[e]['x_speed'].append(np.insert(np.diff(sync_saccades[e]['x_coords'][s]),0,float(0)))
-                sync_saccades[e]['y_speed'].append(np.insert(np.diff(sync_saccades[e]['y_coords'][s]),0,float(0)))
+                sync_saccades[e]['x_speed'].append(np.insert(np.diff(sync_saccades[e]['x_coords'][s]), 0, float(0)))
+                sync_saccades[e]['y_speed'].append(np.insert(np.diff(sync_saccades[e]['y_coords'][s]), 0, float(0)))
 
-                #Understand directionality and magnitude:
+                # Understand directionality and magnitude:
                 # understand before and after
                 x_before, x_after, dx = saccade_before_after(sync_saccades[e]['x_coords'][s])
                 y_before, y_after, dy = saccade_before_after(sync_saccades[e]['y_coords'][s])
@@ -266,7 +266,7 @@ def saccade_dict_enricher(saccade_dict):
                     quad = 0
                 elif dx < 0 < dy:
                     quad = 1
-                elif dx<0 and dy<0:
+                elif dx < 0 and dy < 0:
                     quad = 2
                 elif dx > 0 > dy:
                     quad = 3
@@ -283,27 +283,28 @@ def saccade_dict_enricher(saccade_dict):
     return saccade_dict
 
 
-def parse_dataset_to_df(saccade_dict,blocklist):
+def parse_dataset_to_df(saccade_dict, blocklist):
 
     date_list = [block.oe_dirname[-19:] for block in blocklist]
     num_list = [block.block_num for block in blocklist]
-    num_date_dict = dict(zip(num_list,date_list))
-    df = pd.DataFrame(columns=['datetime','block','eye','timestamps', 'fs', 'pxx', 'samples', 'x_coords', 'y_coords', 'vid_inds', 'x_speed', 'y_speed', 'magnitude', 'dx', 'dy', 'direction','accel'])
+    num_date_dict = dict(zip(num_list, date_list))
+    df = pd.DataFrame(columns=['datetime', 'block', 'eye', 'timestamps', 'fs', 'pxx', 'samples', 'x_coords', 'y_coords',
+                               'vid_inds', 'x_speed', 'y_speed', 'magnitude', 'dx', 'dy', 'direction', 'accel'])
     d = saccade_dict
     index_counter = 0
     for k in d.keys():
         block = d[k] # in a certain block
         for e in block.keys():
-            eye = block[e] #in one of the eyes
+            eye = block[e]  # in one of the eyes
             for row in range(len(eye['samples'])): # for each saccade
-                for col in eye.keys(): # for each columm
-                    v = eye[col][row] # get value of location
-                    df.at[index_counter,'block'] = k
-                    df.at[index_counter,'eye'] = e
-                    df.at[index_counter,'datetime'] = num_date_dict[k]
-                    df.at[index_counter,col] = v
-                print(index_counter,end='\r',flush=True)
-                index_counter +=1
+                for col in eye.keys():  # for each columm
+                    v = eye[col][row]  # get value of location
+                    df.at[index_counter, 'block'] = k
+                    df.at[index_counter, 'eye'] = e
+                    df.at[index_counter, 'datetime'] = num_date_dict[k]
+                    df.at[index_counter, col] = v
+                print(index_counter, end='\r', flush=True)
+                index_counter += 1
     print(f'done, dataframe contains {index_counter} saccades')
     return df
 
@@ -348,10 +349,107 @@ def block_generator(block_numbers, experiment_path, animal, bad_blocks=[], regev
         for block in folder_list:
             if 'block' in str(block):
                 block_number = block.name[-3:]
-                if int(block_number) in block_numbers and int(block_number) not in bad_blocks:
-                    #block definition
-                    block = BlockSync(animal_call=animal,
-                                      experiment_date=date,block_num=block_number,
-                                      path_to_animal_folder=str(experiment_path),regev=regev)
-                    block_collection.append(block)
+                try:
+                    if int(block_number) in block_numbers and int(block_number) not in bad_blocks:
+                        # block definition
+                        block = BlockSync(animal_call=animal,
+                                          experiment_date=date,block_num=block_number,
+                                          path_to_animal_folder=str(experiment_path),regev=regev)
+                        block_collection.append(block)
+                except ValueError:
+                    continue
     return block_collection
+
+
+def create_video_from_segments(segments_df, blocklist, export_path):
+    """
+    This creates a video of connected segments out of the segments_df dataframe and saves it in the export path
+    :param segments_df: a dataframe containing the block number, start ttl , stop ttl for each segment
+    :param blocklist: a list with BlockSync objects that are involved with creating the segments_df
+    :param export_path:
+    :return:
+    """
+    # some stuff for the text
+    font = cv2.FONT_HERSHEY_SIMPLEX
+
+    df = segments_df
+    blockdict = {}
+    for b in blocklist:
+        b_num = b.block_num
+        blockdict[b_num] = b
+
+    # define the video writer
+    vid_out = cv2.VideoWriter(str(export_path),
+                              cv2.VideoWriter_fourcc('H', '2', '6', '4'),
+                              60.0, (640*2, 480))  # set the frame size to be two vid's worth
+
+    # for each block of the dataframe (each segment):
+    for b in np.unique(df['block'].values):
+        block = blockdict[b]
+        b_df = df.query('block == @b')
+
+        # define the eye VideoCaptures
+        rcap = cv2.VideoCapture(block.re_videos[0])
+        lcap = cv2.VideoCapture(block.le_videos[0])
+
+        # for each row of the block df (each video segment):
+        for row in tqdm(b_df.index):
+            # understand the ttls
+            ttl0 = b_df.at[row, 'start']
+            ttl1 = b_df.at[row, 'stop']
+
+            # figure out the frames for each eye
+            seg_df = block.final_sync_df.query("Arena_TTL > @ttl0 and Arena_TTL < @ttl1")
+            r_frames = seg_df['R_eye_frame']
+            l_frames = seg_df['L_eye_frame']
+
+            # initialize the time vector for the segment
+            last_frame_L = 0
+            last_frame_R = 0
+            time_vec = (seg_df['Arena_TTL'].values - block.final_sync_df.iloc[0]['Arena_TTL']) / block.sample_rate
+
+            # for each synced timestamp:
+            for i, t in enumerate(time_vec):
+
+                # get frame numbers from the df
+                rf_num = r_frames.iloc[i]
+                lf_num = l_frames.iloc[i]
+                if rf_num != rf_num:
+                    rf_num = last_frame_R
+                if lf_num != lf_num:
+                    lf_num = last_frame_L
+
+                # read the frame (and make sure to conserve setting steps) - BOTH EYES
+                if last_frame_L + 1 != lf_num:
+                    lcap.set(1, int(lf_num))
+                l_ret, l_f = lcap.read()
+                l_f = cv2.cvtColor(l_f, cv2.COLOR_BGR2GRAY)
+                l_f = cv2.flip(l_f, 0)
+                l_f = cv2.resize(l_f, (640, 480))
+
+                last_frame_L = lf_num
+
+                if last_frame_R + 1 != rf_num:
+                    rcap.set(1, int(rf_num))
+                r_ret, r_f = rcap.read()
+                r_f = cv2.cvtColor(r_f, cv2.COLOR_BGR2GRAY)
+                r_f = cv2.flip(r_f, 0)
+                r_f = cv2.resize(r_f, (640, 480))
+                last_frame_R = rf_num
+
+                if r_ret and l_ret:
+                    eye_concat = np.hstack((l_f, r_f))
+                    eye_concat = cv2.putText(eye_concat, f'Block {block.block_num}, Timestamp [Seconds]: {t} ',
+                                             org=(10, 450), fontFace=font, fontScale=1, color=0, thickness=2)
+                    vid_out.write(eye_concat)
+                    cv2.imshow('frame_view', eye_concat)
+
+                    key = cv2.waitKey(1)
+
+                    if key == ord('q'):
+                        break
+
+        rcap.release()
+        lcap.release()
+    vid_out.release()
+    cv2.destroyAllWindows()
