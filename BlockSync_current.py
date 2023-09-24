@@ -352,10 +352,10 @@ class BlockSync:
         eye_vid_path = self.block_path / 'eye_videos'
         print('converting videos...')
         files_to_convert = [
-            file for file in eye_vid_path.rglob('*.h264') if 'DLC' not in str(file)
+            str(file) for file in eye_vid_path.rglob('*.h264') if 'DLC' not in str(file)
         ]
-        converted_files = [file for file in eye_vid_path.rglob('*.mp4') if 'DLC' not in str(file)]
-        print(f'converting files: {files_to_convert}')
+        converted_files = [str(file) for file in eye_vid_path.rglob('*.mp4') if 'DLC' not in str(file)]
+        print(f'converting files: {files_to_convert} \n avoiding conversion on files: {converted_files}')
         if len(files_to_convert) == 0:
             print('found no eye videos to handle...')
             return None
@@ -372,17 +372,24 @@ class BlockSync:
                 print(f'The file {file[:-5]}.mp4 already exists, no conversion necessary')
         print('Validating videos...')
         videos_to_inspect = \
-            [file for file in eye_vid_path.rglob('*.mp4') if 'DLC' not in file]
+            [str(file) for file in eye_vid_path.rglob('*.mp4') if 'DLC' not in str(file)]
         timestamps_to_inspect = \
-            [file for file in eye_vid_path.rglob('*.csv') if 'DLC' not in file]
-        for vid in range(len(videos_to_inspect)):
-            timestamps = pd.read_csv(timestamps_to_inspect[vid])
-            num_reported = timestamps.shape[0]
-            cap = cv2.VideoCapture(videos_to_inspect[vid])
-            length = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            print(f'The video named {os.path.split(videos_to_inspect[vid])[1]} has reported {num_reported} frames '
-                  f'and has {length} frames, it has dropped {num_reported - length} frames')
-            cap.release()
+            [str(file) for file in eye_vid_path.rglob('*.csv') if 'timestamps.csv' in str(file)]
+        if len(videos_to_inspect) == len(timestamps_to_inspect):
+            for vid in range(len(videos_to_inspect)):
+                timestamps = pd.read_csv(timestamps_to_inspect[vid])
+                num_reported = timestamps.shape[0]
+                cap = cv2.VideoCapture(videos_to_inspect[vid])
+                length = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                print(f'The video named {os.path.split(videos_to_inspect[vid])[1]} has reported {num_reported} frames '
+                      f'and has {length} frames, it has dropped {num_reported - length} frames')
+                cap.release()
+        else:
+            print(f'something wrong with the inspection, numbers of files does not match:')
+            print(f'videos_to_inspect = {videos_to_inspect}')
+            print(f'timestamps_to_inspect = {timestamps_to_inspect}')
+
+
         stamp = 'LE'
         path_to_stamp = eye_vid_path / stamp
         videos_to_stamp = glob.glob(str(path_to_stamp) + r'\**\*.mp4', recursive=True)
@@ -871,7 +878,8 @@ class BlockSync:
 
         # first, check if the analysis folder contains the eye brightnes df:
         if pathlib.Path(self.analysis_path / 'eye_brightness_df.csv').exists():
-            self.eye_brightness_df = pd.read_csv(pathlib.Path(self.analysis_path / 'eye_brightness_df.csv'))
+            self.eye_brightness_df = pd.read_csv(pathlib.Path(self.analysis_path / 'eye_brightness_df.csv'),
+                                                 index_col=0)
             print('eye_brightness_df loaded from analysis folder')
             return self.eye_brightness_df
 
@@ -1460,8 +1468,7 @@ class BlockSync:
             del session
         print('got it!')
 
-    # TODO build a function that creates an internal, fully populated saccade dataframe with the same parameters as
-    #  multi_block_saccade_dict_creation_current but get all of the following notebook steps in as-well
+
     @staticmethod
     def nan_helper(y):
         """Helper to handle indices and logical indices of NaNs.
@@ -1583,6 +1590,153 @@ class BlockSync:
                 s_df = eye_df.query("ms_axis >= @j0 and ms_axis <= @j1")
                 x_coords = s_df['center_x'].values
                 y_coords = s_df['center_y'].values
+                vid_inds = np.array(s_df.Arena_TTL.values - s_df.Arena_TTL.values[0], dtype='int32')
+
+                # deal with missing datapoints in saccades:
+                interpolated_coords = []
+                bad_saccade = False
+                for y in [x_coords, y_coords]:
+                    nan_count = np.sum(np.isnan(y.astype(float)))
+                    if nan_count > 0:
+                        if nan_count < len(y) / 2:
+                            # print(f'saccade at ind {i} has {nan_count} nans, interpolating...')
+                            # find nan values in the vector
+                            nans, z = self.nan_helper(y.astype(float))
+                            # interpolate using the helper lambda function
+                            y[nans] = np.interp(z(nans), z(~nans), y[~nans].astype(float))
+                            # replace the interpolated values for the saccade
+                            interpolated_coords.append(y)
+                        else:
+                            print(f'too many nans at ind {j}, ({np.sum(np.isnan(y))}) - cannot interpolate properly',
+                                  end='\r', flush=True)
+                            bad_saccade = True
+                    else:
+                        interpolated_coords.append(y)
+
+                # get accelerometer data for the ms_based section:
+                # get_ms_segment
+                ms_segment = s_df['ms_axis']
+                s0 = ms_segment.iloc[0]
+                s1 = ms_segment.iloc[-1]
+                mov_mag = np.sum(acc_df.query('t_mov_ms > @s0 and t_mov_ms < @s1').movAll.values)
+
+                # remove bad saccades
+                if bad_saccade:
+                    continue
+                # append OK saccades
+                else:
+                    self.saccade_dict[e]['timestamps'].append(pre_saccade_ts[j])
+                    self.saccade_dict[e]['x_coords'].append(interpolated_coords[0])
+                    self.saccade_dict[e]['y_coords'].append(interpolated_coords[1])
+                    self.saccade_dict[e]['vid_inds'].append(vid_inds)
+                    self.saccade_dict[e]['fs'].append(fs)
+                    self.saccade_dict[e]['pxx'].append(pxx)
+                    self.saccade_dict[e]['samples'].append(saccade_samples)
+                    self.saccade_dict[e]['accel'].append(mov_mag)
+        print(f'block {self.block_num} saccade dict done')
+        self.sort_synced_saccades()
+
+    def saccade_dict_creation_3d(self, sampling_window_ms, ep_channel_number,
+                                 automate_saccade_detection=True, overwrite_saccade_data=False):
+        """
+        This function cascades over the steps that end in two dataframe objects, one for synced saccades and the other
+        non-synced saccades. This function requires completion of all previous analysis steps (in particular, lizMov.mat
+        should be produced using mark's code) - This is the 3D projection demo version - still under construction
+        :param sampling_window_ms: the time window for each saccade (half before half after the saccade)
+        :param ep_channel_number: a channel to get neural data from, limited to 1 for now (you can use get_data to
+        draw additional channels based on timestamps from the dataframe later
+        :return:
+        """
+
+        # as a preliminary step - add phi and theta to the le_df dataframe
+        # read the 3d projection analysis:
+        le_df_3d = pd.read_csv(self.analysis_path / 'le_df_3d.csv', index_col=0)
+        le_df_3d = le_df_3d[['timestamp', 'diameter', 'theta', 'phi']]
+        le_df_3d.rename(columns={'timestamp':'ms_axis'},inplace=True)
+        le_df_3d.interpolate(method='linear', inplace=True)
+
+        re_df_3d = pd.read_csv(self.analysis_path / 're_df_3d.csv', index_col=0)
+        re_df_3d = re_df_3d[['timestamp', 'diameter', 'theta', 'phi']]
+        re_df_3d.rename(columns={'timestamp': 'ms_axis'},inplace=True)
+        re_df_3d.interpolate(method='linear', inplace=True)
+        self.le_df = self.le_df.merge(le_df_3d[['ms_axis', 'theta', 'phi']],
+                                      on='ms_axis', how='left',
+                                      suffixes=('_og', '_3d'))
+        self.re_df = self.re_df.merge(re_df_3d[['ms_axis', 'theta', 'phi']],
+                                      on='ms_axis', how='left',
+                                      suffixes=('', '_3d'))
+
+        # collect accelerometer data
+        # path definition
+        p = self.oe_path / 'analysis'
+        analysis_list = os.listdir(p)
+        correct_analysis = [i for i in analysis_list if self.animal_call in i][0]
+        p = p / str(correct_analysis)
+        matPath = p / 'lizMov.mat'
+        print(f'path to mat file is {matPath}')
+        # read mat file
+        mat_data = h5py.File(str(matPath), 'r')
+        mat_dict = {'t_mov_ms': mat_data['t_mov_ms'][:],
+                    'movAll': mat_data['movAll'][:]}
+
+        acc_df = pd.DataFrame(data=np.array([mat_dict['t_mov_ms'][:, 0], mat_dict['movAll'][:, 0]]).T,
+                              columns=['t_mov_ms', 'movAll'])
+        mat_data.close()
+
+        self.saccade_event_analayzer(automatic=automate_saccade_detection,
+                                     overwrite=overwrite_saccade_data,
+                                     threshold=2)
+
+        # create the top-level block dict object
+        self.saccade_dict = {
+            'L': {},
+            'R': {}
+        }
+
+        # create and populate the internal dictionaries (for each eye)
+        for i, e in enumerate(['L', 'R']):
+            # get the correct saccades_chunked object and eye_df
+            saccades_chunked = [self.l_saccades_chunked, self.r_saccades_chunked][i]
+            eye_df = [self.le_df, self.re_df][i]
+            saccades = saccades_chunked[saccades_chunked.saccade_length_frames > 0]
+            saccade_times = np.sort(saccades.saccade_start_ms.values)
+            ep_channel_numbers = [ep_channel_number]
+            pre_saccade_ts = saccade_times - (sampling_window_ms / 2)  #
+
+            # get the data of the relevant saccade time windows:
+            print(f"getting data with block_number {self.block_num}: \n"
+                  f"There are {len(pre_saccade_ts)} saccade events: \n"
+                  f"pre_saccade_ts = {pre_saccade_ts}"
+                  f"")
+            ep_data, ep_timestamps = self.oe_rec.get_data(ep_channel_numbers,
+                                                          pre_saccade_ts,
+                                                          sampling_window_ms,
+                                                          convert_to_mv=True)  # data [n_channels, n_windows, nSamples]
+
+            # start populating the dictionary
+            self.saccade_dict[e] = {
+                "timestamps": [],
+                "fs": [],
+                "pxx": [],
+                "samples": [],
+                "x_coords": [],
+                "y_coords": [],
+                "vid_inds": [],
+                "accel": []
+            }
+
+            # go saccade by saccade
+            for j in range(len(pre_saccade_ts)):
+                # get specific saccade samples:
+                saccade_samples = ep_data[0, j, :]  # [n_channels, n_windows, nSamples]
+                # get the spectral profile for the segment
+                fs, pxx = sig.welch(saccade_samples, self.sample_rate, nperseg=16384, return_onesided=True)
+
+                j0 = pre_saccade_ts[j]
+                j1 = pre_saccade_ts[j] + sampling_window_ms
+                s_df = eye_df.query("ms_axis >= @j0 and ms_axis <= @j1")
+                x_coords = s_df['phi_3d'].values
+                y_coords = s_df['theta'].values
                 vid_inds = np.array(s_df.Arena_TTL.values - s_df.Arena_TTL.values[0], dtype='int32')
 
                 # deal with missing datapoints in saccades:
@@ -1786,4 +1940,3 @@ class BlockSync:
                 saccade_dict[e]['direction'].append(theta)
 
         return saccade_dict
-
