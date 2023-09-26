@@ -1652,7 +1652,7 @@ class BlockSync:
         # read the 3d projection analysis:
         le_df_3d = pd.read_csv(self.analysis_path / 'le_df_3d.csv', index_col=0)
         le_df_3d = le_df_3d[['timestamp', 'diameter', 'theta', 'phi']]
-        le_df_3d.rename(columns={'timestamp':'ms_axis'},inplace=True)
+        le_df_3d.rename(columns={'timestamp': 'ms_axis'},inplace=True)
         le_df_3d.interpolate(method='linear', inplace=True)
 
         re_df_3d = pd.read_csv(self.analysis_path / 're_df_3d.csv', index_col=0)
@@ -1913,7 +1913,7 @@ class BlockSync:
                 saccade_dict[e]['y_speed'].append(np.insert(np.diff(saccade_dict[e]['y_coords'][s]), 0, float(0)))
 
                 # Understand directionality and magnitude:
-                # understand before and after
+                # understand before and after - SHOULD THINK ABOUT THIS FOR FURTHER CORRECTION LATER
                 x_before, x_after, dx = self.saccade_before_after(saccade_dict[e]['x_coords'][s])
                 y_before, y_after, dy = self.saccade_before_after(saccade_dict[e]['y_coords'][s])
 
