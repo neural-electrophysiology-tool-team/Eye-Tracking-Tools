@@ -1366,13 +1366,13 @@ class BlockSync:
                 start_conditions = self.re_df.iloc[self.re_df['ms_axis'].isin(start).values]
                 end_conditions = self.re_df.iloc[self.re_df['ms_axis'].isin(end).values]
 
-            #This segment deals with getting the euclidean distance without trying to take the sqrt of 0:
+            # This segment deals with getting the euclidean distance without trying to take the sqrt of 0:
             dist_squared = ((start_conditions['center_x'].values - end_conditions['center_x'].values) ** 2) + \
                            ((start_conditions['center_y'].values - end_conditions['center_y'].values) ** 2)
             sqrt_values = np.sqrt(dist_squared[dist_squared != 0].astype(float))
             euclidean_distance = np.zeros_like(dist_squared)
             euclidean_distance[dist_squared != 0] = sqrt_values
-            #euclidean_distance = np.where(dist_squared != 0, np.sqrt(dist_squared[dist_squared != 0]), 0)
+            # euclidean_distance = np.where(dist_squared != 0, np.sqrt(dist_squared[dist_squared != 0]), 0)
             tight_dict[eye] = pd.DataFrame({
                 'saccade_start_ms': start,
                 'saccade_length_frames': lengths,
@@ -1553,6 +1553,7 @@ class BlockSync:
             eye_df = [self.le_df, self.re_df][i]
             saccades = saccades_chunked[saccades_chunked.saccade_length_frames > 0]
             saccade_times = np.sort(saccades.saccade_start_ms.values)
+            saccade_lengths = saccades.saccade_length_frames.values
             ep_channel_numbers = [ep_channel_number]
             pre_saccade_ts = saccade_times - (sampling_window_ms / 2)  #
 
@@ -1575,11 +1576,12 @@ class BlockSync:
                 "x_coords": [],
                 "y_coords": [],
                 "vid_inds": [],
-                "accel": []
+                "accel": [],
+                "length": []
             }
 
             # go saccade by saccade
-            for j in range(len(pre_saccade_ts)):
+            for sac_i, j in enumerate(range(len(pre_saccade_ts))):
                 # get specific saccade samples:
                 saccade_samples = ep_data[0, j, :]  # [n_channels, n_windows, nSamples]
                 # get the spectral profile for the segment
@@ -1633,6 +1635,7 @@ class BlockSync:
                     self.saccade_dict[e]['pxx'].append(pxx)
                     self.saccade_dict[e]['samples'].append(saccade_samples)
                     self.saccade_dict[e]['accel'].append(mov_mag)
+                    self.saccade_dict[e]['length'].append(saccade_lengths[sac_i])
         print(f'block {self.block_num} saccade dict done')
         self.sort_synced_saccades()
 
@@ -1698,8 +1701,9 @@ class BlockSync:
             # get the correct saccades_chunked object and eye_df
             saccades_chunked = [self.l_saccades_chunked, self.r_saccades_chunked][i]
             eye_df = [self.le_df, self.re_df][i]
-            saccades = saccades_chunked[saccades_chunked.saccade_length_frames > 0]
-            saccade_times = np.sort(saccades.saccade_start_ms.values)
+            saccades = saccades_chunked[saccades_chunked.saccade_length_frames > 0].sort_values(by='saccade_start_ms')
+            saccade_times = saccades.saccade_start_ms.values
+            saccade_lengths = saccades.saccade_length_frames.values
             ep_channel_numbers = [ep_channel_number]
             pre_saccade_ts = saccade_times - (sampling_window_ms / 2)  #
 
@@ -1722,11 +1726,12 @@ class BlockSync:
                 "x_coords": [],
                 "y_coords": [],
                 "vid_inds": [],
-                "accel": []
+                "accel": [],
+                "length": []
             }
 
             # go saccade by saccade
-            for j in range(len(pre_saccade_ts)):
+            for sac_i, j in enumerate(range(len(pre_saccade_ts))):
                 # get specific saccade samples:
                 saccade_samples = ep_data[0, j, :]  # [n_channels, n_windows, nSamples]
                 # get the spectral profile for the segment
@@ -1780,11 +1785,12 @@ class BlockSync:
                     self.saccade_dict[e]['pxx'].append(pxx)
                     self.saccade_dict[e]['samples'].append(saccade_samples)
                     self.saccade_dict[e]['accel'].append(mov_mag)
+                    self.saccade_dict[e]['length'].append(saccade_lengths[sac_i])
         print(f'block {self.block_num} saccade dict done')
         self.sort_synced_saccades()
 
     @staticmethod
-    def saccade_before_after(coords):
+    def saccade_before_after_broken(coords):
         max_ind = np.argmax(coords)
         min_ind = np.argmin(coords)
         if max_ind < min_ind:
@@ -1851,7 +1857,8 @@ class BlockSync:
                 "x_coords": np.array(b_dict[e]['x_coords'], dtype=object)[inds],
                 "y_coords": np.array(b_dict[e]['y_coords'], dtype=object)[inds],
                 "vid_inds": np.array(b_dict[e]['vid_inds'], dtype=object)[inds],
-                "accel": np.array(b_dict[e]['accel'])[inds]
+                "accel": np.array(b_dict[e]['accel'])[inds],
+                "length": np.array(b_dict[e]['length'], dtype=object)[inds]
             }
 
         non_sync_b_dict = {
@@ -1870,7 +1877,8 @@ class BlockSync:
                 "x_coords": np.array(b_dict[e]['x_coords'], dtype=object)[logical],
                 "y_coords": np.array(b_dict[e]['y_coords'], dtype=object)[logical],
                 "vid_inds": np.array(b_dict[e]['vid_inds'], dtype=object)[logical],
-                "accel": np.array(b_dict[e]['accel'])[logical]
+                "accel": np.array(b_dict[e]['accel'])[logical],
+                "length": np.array(b_dict[e]['length'], dtype=object)[inds]
             }
         self.calibrate_pixel_size(10)
         self.synced_saccades_dict = self.saccade_dict_enricher(synced_b_dict)
@@ -1892,6 +1900,38 @@ class BlockSync:
             self.non_synced_saccades_df['dx'] * \
             (self.non_synced_saccades_df['eye'].map({'R': self.R_pix_size, 'L': self.L_pix_size}))
 
+
+    @staticmethod
+    def spherical_to_polar(yaw, pitch):
+        """
+        This function recieves yaw and pitch in radians and returns the polar coordinates
+        :param yaw: theta values in radians
+        :param pitch: phi values in radians
+        :return: r: magnitude, theta: the angle (counter-clockwise from the positive x-axis)
+        """
+
+        # Calculate r
+        r = math.sqrt(yaw ** 2 + pitch ** 2)
+
+        # Calculate theta
+        theta_rad = math.atan2(pitch, yaw)
+
+        # Convert theta to degrees
+        theta_deg = math.degrees(theta_rad)
+
+        # Adjust theta to the range [0, 360)
+        if theta_deg < 0:
+            theta_deg += 360
+
+        return r, theta_deg
+
+    @staticmethod
+    def saccade_before_after(coords):
+        before = coords[0]
+        after = coords[-1]
+        delta = after - before
+        return before, after, delta
+
     def saccade_dict_enricher(self, saccade_dict):
         """
         Helper function to enrich saccade dictionary before arranging it into a dataframe
@@ -1911,15 +1951,21 @@ class BlockSync:
                 # speed:
                 saccade_dict[e]['x_speed'].append(np.insert(np.diff(saccade_dict[e]['x_coords'][s]), 0, float(0)))
                 saccade_dict[e]['y_speed'].append(np.insert(np.diff(saccade_dict[e]['y_coords'][s]), 0, float(0)))
-
+                saccade_length = saccade_dict[e]['length'][s]
                 # Understand directionality and magnitude:
                 # understand before and after - SHOULD THINK ABOUT THIS FOR FURTHER CORRECTION LATER
-                x_before, x_after, dx = self.saccade_before_after(saccade_dict[e]['x_coords'][s])
-                y_before, y_after, dy = self.saccade_before_after(saccade_dict[e]['y_coords'][s])
+                saccade_initiation_ind = int(len(saccade_dict[e]['x_coords'][s])) // 2
+                saccade_end_ind = saccade_initiation_ind + int(saccade_length)
+                x_before, x_after, dx = self.saccade_before_after(saccade_dict[e]['x_coords'][s][saccade_initiation_ind:saccade_end_ind+1])
+                y_before, y_after, dy = self.saccade_before_after(saccade_dict[e]['y_coords'][s][saccade_initiation_ind:saccade_end_ind+1])
 
-                # calculate magnitude (euclidean)
+                s_mag, theta = self.spherical_to_polar(dx, dy)
+
+
+                # old version, with error!!!
+                """
                 s_mag = np.sqrt(dx ** 2 + dy ** 2)
-
+                
                 # get direction quadrant
                 if dx > 0 and dy > 0:
                     quad = 0
@@ -1932,6 +1978,7 @@ class BlockSync:
                 # get direction (theta calculated from quadrent border)
                 degrees_in_quadrent = np.rad2deg(np.arctan(np.abs(dy) / np.abs(dx)))
                 theta = degrees_in_quadrent + (quad * 90)
+                """
 
                 # collect into dict
                 saccade_dict[e]['dx'].append(dx)
@@ -1940,3 +1987,5 @@ class BlockSync:
                 saccade_dict[e]['direction'].append(theta)
 
         return saccade_dict
+
+
