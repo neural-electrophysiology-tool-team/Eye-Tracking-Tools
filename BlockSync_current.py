@@ -18,7 +18,8 @@ from scipy import signal
 from tqdm import tqdm
 import pickle
 from OERecording import OERecording
-import scipy.signal as sig
+from scipy.signal import welch, fftconvolve
+from matplotlib import pyplot as plt
 
 '''
 This script defines the BlockSync class which takes all of the relevant data for a given trial and can be utilized
@@ -199,6 +200,8 @@ class BlockSync:
         self.non_synced_saccades_dict = None
         self.non_synced_saccades_df = None
         self.synced_saccades_df = None
+        self.le_jitter_dict = None
+        self.re_jitter_dict = None
 
     def __str__(self):
         return str(f'{self.animal_call}, block {self.block_num}, on {self.exp_date_time}')
@@ -620,7 +623,7 @@ class BlockSync:
         """
         # check if there is an exported version of the blocksync_df:
         if pathlib.Path(self.analysis_path / 'blocksync_df.csv').exists():
-            self.blocksync_df = pd.read_csv(pathlib.Path(self.analysis_path / 'blocksync_df.csv'))
+            self.blocksync_df = pd.read_csv(pathlib.Path(self.analysis_path / 'blocksync_df.csv'), engine='python')
             print('blocksync_df loaded from analysis folder')
             return self.blocksync_df
         else:
@@ -1188,6 +1191,239 @@ class BlockSync:
             self.re_df.to_csv(self.analysis_path / 're_df.csv')
             self.le_df.to_csv(self.analysis_path / 'le_df.csv')
 
+
+    # TODO: !!!!write the jitter correction algorithm here!!!!
+    @staticmethod
+    def euclidean_distance(coord1, coord2):
+        """
+        Compute the Euclidean distance between two sets of (x, y) coordinates.
+
+        Parameters:
+        - coord1: Tuple or array-like, representing the first set of coordinates (x1, y1).
+        - coord2: Tuple or array-like, representing the second set of coordinates (x2, y2).
+
+        Returns:
+        - distance: Euclidean distance between coord1 and coord2.
+        """
+        coord1 = np.array(coord1)
+        coord2 = np.array(coord2)
+
+        # Calculate the Euclidean distance
+        distance = np.sqrt(np.sum((coord1 - coord2) ** 2))
+
+        return distance
+
+    @staticmethod
+    def normxcorr2(template, image, mode="full"):
+        """
+        Computes the normalized cross-correlation between a template and an image.
+
+        Parameters:
+        - template (numpy.ndarray): The template array for cross-correlation.
+        - image (numpy.ndarray): The image array on which cross-correlation is performed.
+        - mode (str, optional): The mode parameter for the cross-correlation operation.
+          Default is "full", indicating that the output is the full discrete linear cross-correlation of the inputs.
+
+        Returns:
+        - numpy.ndarray: The normalized cross-correlation result between the template and the image.
+
+        Normalized cross-correlation is a measure of similarity between the template and sub-regions of the image.
+        The function first normalizes the input arrays by subtracting their means and performs cross-correlation
+        using fast Fourier transform (FFT) for efficiency. The result is then normalized by the standard deviations
+        of the template and the image.
+
+        Note: The function handles cases where divisions by zero or very close to zero might occur, setting the
+        corresponding elements in the output to zero.
+        """
+        template = template - np.mean(template)
+        image = image - np.mean(image)
+
+        a1 = np.ones(template.shape)
+        # Faster to flip up down and left right then use fftconvolve instead of scipy's correlate
+        ar = np.flipud(np.fliplr(template))
+        out = fftconvolve(image, ar.conj(), mode=mode)
+
+        image = fftconvolve(np.square(image), a1, mode=mode) - \
+                np.square(fftconvolve(image, a1, mode=mode)) / (np.prod(template.shape))
+
+        # Remove small machine precision errors after subtraction
+        image[np.where(image < 0)] = 0
+
+        template = np.sum(np.square(template))
+        out = out / np.sqrt(image * template)
+
+        # Remove any divisions by 0 or very close to 0
+        out[np.where(np.logical_not(np.isfinite(out)))] = 0
+
+        return out
+
+    @staticmethod
+    def get_roi_for_correlation(video_path):
+        # Open the video file
+        cap = cv2.VideoCapture(video_path)
+
+        # Check if the video file is opened successfully
+        if not cap.isOpened():
+            print("Error: Could not open video file.")
+            return
+
+        # prompt user for ROI
+        ret, frame = cap.read()
+        roi = list(cv2.selectROI(frame))
+
+        # make sure the ROI has an odd number of pixels
+        if roi[2] % 2 == 0:
+            roi[2] += 1
+        if roi[3] % 2 == 0:
+            roi[3] += 1
+
+        cv2.destroyAllWindows()
+
+        return roi
+
+    def compute_cross_correlation(self, video_path, roi, correlate_with_first_frame=True):
+
+        # sort roi coords
+        x, y, w, h = tuple(roi)
+
+        # Initialize variables
+        ref_correlation_ind_xy = None
+        top_correlation_values = []
+        top_correlation_xy = []
+        top_correlation_dist = []
+        x_displacement = []
+        y_displacement = []
+        first_frame = None
+
+        # Open the video file
+        cap = cv2.VideoCapture(video_path)
+
+        # Read the first frame
+        ret, prev_frame = cap.read()
+
+        # Convert to grayscale and extract ROI
+        prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
+        prev_roi = prev_gray[y:y + h, x:x + w]
+
+        # Read video frames and compute cross-correlation over time
+        num_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        for _ in tqdm(range(num_frames), desc="Computing Cross-Correlation", unit="frame"):
+            # for _ in tqdm.tqdm(range(1)):
+            ret, frame = cap.read()
+
+            if not ret:
+                break
+            # Convert to grayscale and extract ROI
+            gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            roi_frame = gray_frame[y:y + h, x:x + w]
+            if first_frame is None:
+                first_frame = roi_frame
+            correlation = self.normxcorr2(prev_roi, roi_frame)
+            if correlate_with_first_frame:
+                correlation = self.normxcorr2(first_frame, roi_frame)
+
+            curr_max_coords = np.where(correlation == np.max(correlation))
+            x_cur, y_cur = curr_max_coords[0][0], curr_max_coords[1][0]
+
+            if ref_correlation_ind_xy is None:
+                ref_correlation_ind_xy = [x_cur, y_cur]
+                x_ref, y_ref = ref_correlation_ind_xy[0], ref_correlation_ind_xy[1]
+
+            current_distance = self.euclidean_distance((x_cur, y_cur), (x_ref, y_ref))
+            x_displacement.append(x_ref - x_cur)
+            y_displacement.append(y_ref - y_cur)
+            top_correlation_dist.append(current_distance)
+            top_correlation_xy.append([x_cur, y_cur])
+            top_correlation_values.append(np.max(correlation))
+
+            # Update the previous frame and ROI
+            prev_roi = roi_frame
+
+        # Release the video capture object
+        cap.release()
+
+        # export the results as a dictionary
+        result_dict = {
+            'top_correlation_values': top_correlation_values,
+            'top_correlation_dist': top_correlation_dist,
+            'top_correlation_xy': top_correlation_xy,
+            'y_displacement': y_displacement,
+            'x_displacement': x_displacement
+        }
+        return result_dict
+
+    def get_jitter_reports(self, export=False, overwrite=False):
+
+        if (self.analysis_path / 'jitter_report_dict.pkl').exists() and overwrite is False:
+            with open(self.analysis_path / 'jitter_report_dict.pkl', 'rb') as file:
+                jitter_report_dict = pickle.load(file)
+                if self.re_jitter_dict is None:
+                    self.re_jitter_dict = jitter_report_dict['left_eye']
+                if self.le_jitter_dict is None:
+                    self.le_jitter_dict = jitter_report_dict['right_eye']
+                print('jitter report loaded from analysis folder')
+        else:
+            # get ROI for each eye video
+            left_eye_roi = self.get_roi_for_correlation(self.le_videos[0])
+            right_eye_roi = self.get_roi_for_correlation(self.re_videos[0])
+
+            # run the algorithm
+            self.re_jitter_dict = self.compute_cross_correlation(self.re_videos[0], right_eye_roi)
+            self.le_jitter_dict = self.compute_cross_correlation(self.le_videos[0], left_eye_roi)
+
+            if export:
+                export_path = self.analysis_path / 'jitter_report_dict.pkl'
+                jitter_report_dict = {
+
+                    'left_eye': self.le_jitter_dict,
+                    'right_eye': self.re_jitter_dict
+                }
+
+                with open(export_path, 'wb') as file:
+                    pickle.dump(jitter_report_dict, file)
+                print(f'results saved to {export_path}')
+
+            print('Jitter report computed - check out re/le_jitter_dict attributes')
+
+    @staticmethod
+    def plot_correlation_vectors(jitter_dict,
+                                 fig_suptitle=None,
+                                 num_ticks=None,
+                                 export_path=False):
+        top_correlation_values = jitter_dict['top_correlation_values']
+        top_correlation_dist = jitter_dict['top_correlation_dist']
+        top_correlation_xy = jitter_dict['top_correlation_xy']
+
+        fig, axs = plt.subplots(3, 1, figsize=(20, 7), sharex=True, dpi=300, constrained_layout=False)
+        fig.suptitle(fig_suptitle)
+        x_axis = np.arange(len(top_correlation_values)) // 60
+        if num_ticks is not None:
+            x_ticker = np.round(np.linspace(x_axis[0], x_axis[-1], num_ticks))
+        axs[0].plot(x_axis, top_correlation_values)
+        axs[0].set_title('top correlation values')
+        axs[0].set_ylabel('Corr score')
+        if num_ticks is not None:
+            axs[0].set_xticks(x_ticker)
+        axs[0].grid(True, linestyle='dotted')
+        axs[1].plot(x_axis, top_correlation_dist)
+        axs[1].set_title('top correlation euclidean distance')
+        axs[1].set_ylabel('distance [pixels]')
+        if num_ticks is not None:
+            axs[1].set_xticks(x_ticker)
+        axs[1].grid(True, linestyle='dotted')
+        _ = axs[2].plot(x_axis, top_correlation_xy)
+        axs[2].set_title('XY coordinates of top correlation values')
+        axs[2].set_ylabel('top corr coordinates')
+        axs[2].set_xlabel('Seconds')
+        if num_ticks is not None:
+            axs[2].set_xticks(x_ticker)
+        axs[2].grid(True, linestyle='dotted')
+        plt.tight_layout()
+        if export_path is not False:
+            fig.savefig(export_path)
+        return fig
+
     def block_eye_plot(self, export=False, ms_x_axis=True, plot_saccade_locs=False,
                        saccade_frames_l=None, saccade_frames_r=None):
         # normalize values:
@@ -1585,7 +1821,7 @@ class BlockSync:
                 # get specific saccade samples:
                 saccade_samples = ep_data[0, j, :]  # [n_channels, n_windows, nSamples]
                 # get the spectral profile for the segment
-                fs, pxx = sig.welch(saccade_samples, self.sample_rate, nperseg=16384, return_onesided=True)
+                fs, pxx = welch(saccade_samples, self.sample_rate, nperseg=16384, return_onesided=True)
 
                 j0 = pre_saccade_ts[j]
                 j1 = pre_saccade_ts[j] + sampling_window_ms
@@ -1735,7 +1971,7 @@ class BlockSync:
                 # get specific saccade samples:
                 saccade_samples = ep_data[0, j, :]  # [n_channels, n_windows, nSamples]
                 # get the spectral profile for the segment
-                fs, pxx = sig.welch(saccade_samples, self.sample_rate, nperseg=16384, return_onesided=True)
+                fs, pxx = welch(saccade_samples, self.sample_rate, nperseg=16384, return_onesided=True)
 
                 j0 = pre_saccade_ts[j]
                 j1 = pre_saccade_ts[j] + sampling_window_ms
@@ -1946,6 +2182,10 @@ class BlockSync:
             saccade_dict[e]['dx'] = []  # TEMP
             saccade_dict[e]['dy'] = []  # TEMP
             saccade_dict[e]['direction'] = []
+            saccade_dict[e]['saccade_initiation_x'] = []
+            saccade_dict[e]['saccade_initiation_y'] = []
+            saccade_dict[e]['saccade_termination_x'] = []
+            saccade_dict[e]['saccade_termination_y'] = []
 
             for s in range(len(saccade_dict[e]['timestamps'])):
                 # speed:
@@ -1985,6 +2225,10 @@ class BlockSync:
                 saccade_dict[e]['dy'].append(dy)
                 saccade_dict[e]['magnitude'].append(s_mag)
                 saccade_dict[e]['direction'].append(theta)
+                saccade_dict[e]['saccade_initiation_x'].append(x_before)
+                saccade_dict[e]['saccade_initiation_y'].append(y_before)
+                saccade_dict[e]['saccade_termination_x'].append(x_after)
+                saccade_dict[e]['saccade_termination_y'].append(y_after)
 
         return saccade_dict
 
