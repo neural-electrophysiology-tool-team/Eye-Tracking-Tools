@@ -1192,7 +1192,7 @@ class BlockSync:
             self.le_df.to_csv(self.analysis_path / 'le_df.csv')
 
 
-    # TODO: !!!!write the jitter correction algorithm here!!!!
+    # jitter detection algorithm starts here:
     @staticmethod
     def euclidean_distance(coord1, coord2):
         """
@@ -1387,10 +1387,10 @@ class BlockSync:
             print('Jitter report computed - check out re/le_jitter_dict attributes')
 
     @staticmethod
-    def plot_correlation_vectors(jitter_dict,
-                                 fig_suptitle=None,
-                                 num_ticks=None,
-                                 export_path=False):
+    def plot_jitter_vectors(jitter_dict,
+                            fig_suptitle=None,
+                            num_ticks=None,
+                            export_path=False):
         top_correlation_values = jitter_dict['top_correlation_values']
         top_correlation_dist = jitter_dict['top_correlation_dist']
         top_correlation_xy = jitter_dict['top_correlation_xy']
@@ -1419,10 +1419,15 @@ class BlockSync:
         if num_ticks is not None:
             axs[2].set_xticks(x_ticker)
         axs[2].grid(True, linestyle='dotted')
-        plt.tight_layout()
         if export_path is not False:
             fig.savefig(export_path)
         return fig
+
+    # TODO: !!!!write the jitter correction algorithm here!!!!
+
+    def correct_jitter(self):
+        print('method not implemented')
+        return
 
     def block_eye_plot(self, export=False, ms_x_axis=True, plot_saccade_locs=False,
                        saccade_frames_l=None, saccade_frames_r=None):
