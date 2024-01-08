@@ -19,6 +19,8 @@ from tqdm import tqdm
 import pickle
 from OERecording import OERecording
 from scipy.signal import welch, fftconvolve
+from scipy.stats import zscore as scipy_zscore
+from scipy.signal import find_peaks as scipy_find_peaks
 from matplotlib import pyplot as plt
 
 '''
@@ -188,6 +190,7 @@ class BlockSync:
         self.r_saccades = None
         self.l_saccades = None
         self.manual_sync_df = None
+        self.final_sync_df = None
         self.r_saccades_chunked = None
         self.l_saccades_chunked = None
         self.L_pix_size = None
@@ -200,6 +203,8 @@ class BlockSync:
         self.non_synced_saccades_dict = None
         self.non_synced_saccades_df = None
         self.synced_saccades_df = None
+        self.led_blink_frames_l = None
+        self.led_blink_frames_r = None
         self.le_jitter_dict = None
         self.re_jitter_dict = None
 
@@ -283,19 +288,19 @@ class BlockSync:
             that sample #0t is given to the first aquired sample
             """
             # Create a copy of the DataFrame to avoid modifying the original
-            subtracted_df = df.copy()
+            sub_df = df.copy()
 
             # Iterate over the column names in the list
             for column_name in column_names:
                 # Check if the column exists in the DataFrame
-                if column_name in subtracted_df.columns:
+                if column_name in sub_df.columns:
                     # Get the indices where the column value is not NaN
-                    indices = subtracted_df.index[~pd.isna(subtracted_df[column_name])]
+                    indices = sub_df.index[~pd.isna(sub_df[column_name])]
 
                     # Subtract the subtraction number from the selected indices
-                    subtracted_df.loc[indices, column_name] -= subtraction_number
+                    sub_df.loc[indices, column_name] -= subtraction_number
 
-            return subtracted_df
+            return sub_df
 
         csv_export_path = self.block_path / 'oe_files' / self.oe_dirname / 'events.csv'
         if not csv_export_path.is_file():
@@ -392,7 +397,6 @@ class BlockSync:
             print(f'videos_to_inspect = {videos_to_inspect}')
             print(f'timestamps_to_inspect = {timestamps_to_inspect}')
 
-
         stamp = 'LE'
         path_to_stamp = eye_vid_path / stamp
         videos_to_stamp = glob.glob(str(path_to_stamp) + r'\**\*.mp4', recursive=True)
@@ -440,7 +444,7 @@ class BlockSync:
                 export_path = p
                 frame_val_dict = {
 
-                    'left_eye':self.le_frame_val_list,
+                    'left_eye': self.le_frame_val_list,
                     'right_eye': self.re_frame_val_list
                 }
 
@@ -469,7 +473,6 @@ class BlockSync:
         if self.re_frame_val_list is None:
             self.re_frame_val_list = eye_brightness_dict['right_eye']
 
-
         if export:
             export_path = self.analysis_path / 'eye_brightness_values_dict.pkl'
             frame_val_dict = {
@@ -490,10 +493,10 @@ class BlockSync:
         :param channel_names: a dictionary of the form -
                         { 1 : 'channel name' (L_eye_camera)
                           2 : 'channel name' (Arena_TTL)
-                          etc..
-                        }
+                          etc...}
         :param export_path: default None, if a path is specified a csv file will be saved
         :param arena_channel_name: the name in channel names which correponds with the arena TTLs
+        :param auto_break_selection: When True, automatically selects the default ttl breaks to use as start/stop frames
         :returns open_ephys_events: a pandas DataFrame object where each column has the ON events of one channel
                                     and has a title from channel_names
         :returns open_ephys_off_events: same but for the OFF states (only important for the logical start-stop signal)
@@ -519,8 +522,8 @@ class BlockSync:
                     arena_start_stop = np.where(diff_series > 10 * diff_mode)[0]
                     if len(arena_start_stop) != 2:
                         if auto_break_selection is not False:
-                            start_ind = auto_break_selection[0]
-                            end_ind = auto_break_selection[1]
+                            start_ind = arena_start_stop[0]
+                            end_ind = arena_start_stop[1]
                         else:
                             start_ind = input(f'there is some kind of problem because '
                                               f'there should be 2 breaks in the arena TTLs'
@@ -541,7 +544,9 @@ class BlockSync:
                 else:
                     print(f'{sname} was not identified as {arena_channel_name}')
                 # create a counter for every rising edge - these should match video frames
-                s_counter = pd.Series(data=np.arange(len(s), dtype='Int32'), index=s.index.values, name=sname + '_frame')
+                s_counter = pd.Series(data=np.arange(len(s), dtype='Int32'),
+                                      index=s.index.values,
+                                      name=sname + '_frame')
                 ls.append(s)
                 ls.append(s_counter)
             # concatenate all channels into a dataframe with open-ephys compatible timestamps
@@ -712,6 +717,7 @@ class BlockSync:
         i = 0
         mean_values = []
         indexes = []
+
         while flag == 0:
             print('Frame number {} of {}'.format(i, all_frames), end='\r', flush=True)
             ret, frame = cap.read()
@@ -795,12 +801,12 @@ class BlockSync:
             # populate the df, starting with the anchor:
             self.arena_sync_df[self.arena_sync_df.columns[anchor_ind]] = range(len(anchor_vid))
             vids_to_sync = list(self.arena_sync_df.drop(axis=1, labels=self.anchor_vid_name).columns)  # CHECK ME !!!!
-            anchor_df = df_list.pop(anchor_ind)
+            _ = df_list.pop(anchor_ind)
             df_to_sync = df_list
             # iterate over rows and videos to find the corresponding frames
             print('Synchronizing the different arena videos')
             if '0' in anchor_vid.columns:
-                anchor_vid.rename(columns={'0':'timestamp'}, inplace=True)
+                anchor_vid.rename(columns={'0': 'timestamp'}, inplace=True)
             for row in tqdm(self.arena_sync_df.index):
                 anchor = anchor_vid.timestamp[row]
                 for vid in range(len(df_to_sync)):
@@ -1019,9 +1025,9 @@ class BlockSync:
 
         """This is a utility function which detects rising edges for manual synchronization of eyes and arena"""
         r_rising = self.blink_rising_edges_detector(self.manual_sync_df['R_values'].values,
-                                                       self.manual_sync_df['R_eye_frame'], threshold=threshold)
+                                                    self.manual_sync_df['R_eye_frame'], threshold=threshold)
         l_rising = self.blink_rising_edges_detector(self.manual_sync_df['L_values'].values,
-                                                       self.manual_sync_df['L_eye_frame'], threshold=threshold)
+                                                    self.manual_sync_df['L_eye_frame'], threshold=threshold)
         dict_rising = {'left': l_rising,
                        'right': r_rising}
         return dict_rising
@@ -1069,7 +1075,7 @@ class BlockSync:
                 self.final_sync_df = self.manual_sync_df.drop(axis=1, labels='Unnamed: 0')
             else:
                 self.final_sync_df = self.manual_sync_df
-            # create a joint x axis with ms timebase for later use
+            # create a joint x-axis with ms timebase for later use
             if align_zero:
                 self.ms_axis = self.final_sync_df['Arena_TTL'].values / (self.sample_rate / 1000)
             else:
@@ -1077,6 +1083,50 @@ class BlockSync:
                                 self.final_sync_df['Arena_TTL'].values[0]) / (self.sample_rate / 1000)
         except FileNotFoundError:
             print(f'there is no manual sync file for block {self.block_num}, manually sync the block')
+
+    @staticmethod
+    def interpolate_nan(data):
+        """
+        Interpolate NaN values in the input data.
+
+        Parameters:
+        - data (numpy array): The input data array.
+
+        Returns:
+        - numpy array: The data with NaN values interpolated.
+        """
+        nan_indices = np.isnan(data)
+        not_nan_indices = ~nan_indices
+        data[nan_indices] = np.interp(np.flatnonzero(nan_indices), np.flatnonzero(not_nan_indices),
+                                      data[not_nan_indices])
+        return data
+
+    def high_pass_frequency_filter(self, data, sampling_rate, cutoff_frequency, order=4):
+        """
+        Apply a high-pass Butterworth filter to the input data.
+
+        Parameters:
+        - data (numpy array): The input data array.
+        - sampling_rate (float): The sampling rate of the input data.
+        - cutoff_frequency (float): The cutoff frequency for the high-pass filter.
+        - order (int): The order of the Butterworth filter (default is 4).
+
+        Returns:
+        - numpy array: The high-pass filtered data array.
+        """
+        # Interpolate NaN values in the input data
+        data = self.interpolate_nan(data)
+
+        # Normalize the cutoff frequency
+        normalized_cutoff = cutoff_frequency / (0.5 * sampling_rate)
+
+        # Design a high-pass Butterworth filter in second-order sections (SOS)
+        sos = signal.butter(order, normalized_cutoff, btype='high', analog=False, output='sos')
+
+        # Apply the SOS filter to the data
+        filtered_data = signal.sosfilt(sos, data)
+
+        return filtered_data
 
     @staticmethod
     def eye_tracking_analysis(dlc_video_analysis_csv, uncertainty_thr):
@@ -1089,17 +1139,28 @@ class BlockSync:
         # import the dataframe and convert it to floats
         data = dlc_video_analysis_csv
         data = data.iloc[1:].apply(pd.to_numeric)
-        # sort the pupil elements to x and y, with p as probability
+
+        # sort the pupil elements to dfs: x and y, with p as probability
         pupil_elements = np.array([x for x in data.columns if 'Pupil' in x])
-        pupil_xs = data[pupil_elements[np.arange(0, len(pupil_elements), 3)]]
+
+        # get X coords
+        pupil_xs_before_flip = data[pupil_elements[np.arange(0, len(pupil_elements), 3)]]
+
+        # flip the data around the midpoint of the x-axis (shooting the eye through a camera flips right and left)
+        pupil_xs = 320 * 2 - pupil_xs_before_flip
+
+        # get Y coords (no need to flip as opencv conventions already start with origin at top left of frame
+        # and so, positive Y is maintained as up in a flipped image as we have)
         pupil_ys = data[pupil_elements[np.arange(1, len(pupil_elements), 3)]]
         pupil_ps = data[pupil_elements[np.arange(2, len(pupil_elements), 3)]]
+
         # rename dataframes for masking with p values of bad points:
         pupil_ps = pupil_ps.rename(columns=dict(zip(pupil_ps.columns, pupil_xs.columns)))
         pupil_ys = pupil_ys.rename(columns=dict(zip(pupil_ys.columns, pupil_xs.columns)))
         good_points = pupil_ps > uncertainty_thr
         pupil_xs = pupil_xs[good_points]
         pupil_ys = pupil_ys[good_points]
+
         # Do the same for the edges
         # edge_elements = [x for x in data.columns if 'edge' in x]
         # edge_xs = data[edge_elements[np.arange(0,len(edge_elements),3)]]
@@ -1114,12 +1175,14 @@ class BlockSync:
         caudal_edge_ls = []
         rostral_edge_ls = []
         for row in tqdm(range(1, len(data) - 1)):
-            # first, take all of the values, and concatenate them into an X array
+            # first, take all the values, and concatenate them into an X array
             x_values = pupil_xs.loc[row].values
             y_values = pupil_ys.loc[row].values
             X = np.c_[x_values, y_values]
+
             # now, remove nan values, and check if there are enough points to make the ellipse
             X = X[~ np.isnan(X).any(axis=1)]
+
             # if there are enough rows for a fit, make an ellipse
             if X.shape[0] > 5:
                 el = LsqEllipse().fit(X)
@@ -1129,6 +1192,7 @@ class BlockSync:
                 ellipses.append([center_x, center_y, width, height, phi])
             else:
                 ellipses.append([np.nan, np.nan, np.nan, np.nan, np.nan])
+
             # caudal_edge = [
             #     float(data['Caudal_edge'][row]),
             #     float(data['Caudal_edge.1'][row])
@@ -1141,6 +1205,7 @@ class BlockSync:
             # rostral_edge_ls.append(rostral_edge)
             # if row % 50 == 0:
             #   print(f'just finished with {row} out of {len(data)-1}', end='\r',flush=True)
+
         ellipse_df = pd.DataFrame(columns=['center_x', 'center_y', 'width', 'height', 'phi'], data=ellipses)
         a = np.array(ellipse_df['height'][:])
         b = np.array(ellipse_df['width'][:])
@@ -1148,7 +1213,8 @@ class BlockSync:
         ellipse_df['ellipse_size'] = ellipse_size_per_frame
         # ellipse_df['rostral_edge'] = rostral_edge_ls
         # ellipse_df['caudal_edge'] = caudal_edge_ls
-        print(f'\n ellipses calc complete')
+
+        print(f'\n ellipses calculation complete')
         return ellipse_df
 
     def read_dlc_data(self, threshold_to_use=0.999, export=True):
@@ -1191,8 +1257,123 @@ class BlockSync:
             self.re_df.to_csv(self.analysis_path / 're_df.csv')
             self.le_df.to_csv(self.analysis_path / 'le_df.csv')
 
-
     # jitter detection algorithm starts here:
+
+    # The following functions deal with robustly removing lights-out frames from the video jitter analysis, could
+    # expand these indices to bad video frame removal later:
+
+    @staticmethod
+    def rolling_window_z_scores(data, roll_w_size=120):
+        """
+        Detect threshold-crossing data points in a 1D data vector using a rolling window approach.
+
+        Parameters:
+        - data (numpy array): 1D data vector with values.
+        - roll_w_size (int): Size, in samples, of the rolling window.
+
+        Returns:
+        - numpy array: A 1D array where each element is the relative z-score of the original value in its window
+        """
+        result = []
+        len_data = len(data)
+
+        for i in tqdm(range(0, len_data - roll_w_size + 1, roll_w_size)):
+            window_data = data[i:i + roll_w_size]
+
+            std_value = np.std(window_data)
+            zscores = scipy_zscore(window_data)
+
+            # threshold_crossing_indices = np.where(window_data < std_value*threshold)[0]
+            if i == 0:
+                result = zscores
+            else:
+                result = np.concatenate([result, zscores])
+
+        # Handle remaining elements after the last complete rolling window
+        last_window_start = len_data - roll_w_size
+        last_window_data = data[last_window_start:]
+
+        std_value_last = np.std(last_window_data)
+        zscores_last = scipy_zscore(last_window_data)
+        result = np.concatenate([result, zscores_last])
+
+        return result
+
+    @staticmethod
+    def bokeh_plotter(data_vector,
+                      plot_name='default',
+                      x_axis='X',
+                      y_axis='Y',
+                      peaks=None):
+        """Generates an interactive Bokeh plot for the given data vector.
+        Args:
+            data_vector (list or array): The data to be plotted.
+            plot_name (str, optional): The title of the plot. Defaults to 'default'.
+            x_axis (str, optional): The label for the x-axis. Defaults to 'X'.
+            y_axis (str, optional): The label for the y-axis. Defaults to 'Y'.
+            peaks (list or array, optional): Indices of peaks to highlight on the plot. Defaults to None.
+        """
+        fig = figure(title=f'bokeh explorer: {plot_name}',
+                     x_axis_label=x_axis,
+                     y_axis_label=y_axis,
+                     plot_width=1500,
+                     plot_height=700)
+        fig.line(range(len(data_vector)), data_vector)
+        if peaks is not None:
+            fig.circle(peaks, data_vector[peaks], size=10, color='red')
+        show(fig)
+
+    def collect_lights_out_events(self, data, roll_w_size=1500, plot=False, plot_title='peak detector output'):
+        """Identifies potential lights-out events from the given data.
+
+        Args:
+            data (list or array): The data containing light measurements.
+            roll_w_size (int, optional): The window size for rolling z-score calculation. Defaults to 1500.
+            plot (binary): when True, plots the output and detection results
+            plot_title (str): plot title for differentiation
+        Returns:
+            list: Indices of the identified potential lights-out events.
+        """
+
+        print(f'data length is {len(data)}')
+        # use a function to get relative z-scores and deal with changes in ambient light
+        z_score_data = self.rolling_window_z_scores(data, roll_w_size=roll_w_size)
+        z_score_data = z_score_data[:len(data)]
+        print(f'z_score length is {len(z_score_data)}')
+        # detect peaks based on the scipy algorithm
+        peak_indices, _ = scipy_find_peaks(-1 * z_score_data, width=1, distance=3000)
+
+        # expand the peaks to include the dimming and re-lighting frames
+        expanded_indices = np.sort(np.array([peak_indices - 2,
+                                             peak_indices - 1,
+                                             peak_indices,
+                                             peak_indices + 1,
+                                             peak_indices + 2]).flatten())
+
+        if plot:
+            self.bokeh_plotter(z_score_data,
+                               plot_name=plot_title,
+                               x_axis='Frame',
+                               y_axis='brightness Z score',
+                               peaks=expanded_indices)
+
+        return expanded_indices
+
+    def find_led_blink_frames(self, plot=False):
+        r_vals = self.re_frame_val_list[0][1]
+        l_vals = self.le_frame_val_list[0][1]
+
+        print('collecting left-eye data')
+        l_peaks = self.collect_lights_out_events(data=l_vals,
+                                                 plot=plot,
+                                                 plot_title='Left eye peak detection output')
+        print("collecting right eye data")
+        r_peaks = self.collect_lights_out_events(data=r_vals,
+                                                 plot=plot,
+                                                 plot_title='right eye peak detection output')
+        self.led_blink_frames_l = l_peaks
+        self.led_blink_frames_r = r_peaks
+
     @staticmethod
     def euclidean_distance(coord1, coord2):
         """
@@ -1351,17 +1532,39 @@ class BlockSync:
             'y_displacement': y_displacement,
             'x_displacement': x_displacement
         }
+        result_dict = self.sort_jitter_dict(result_dict)
         return result_dict
 
-    def get_jitter_reports(self, export=False, overwrite=False):
+    @staticmethod
+    def sort_jitter_dict(jitter_dict):
+        """an internal method to sort out some mass"""
+        curr_data = jitter_dict
+        top_corr_x = np.array(curr_data['top_correlation_xy'])[:, 0]
+        top_corr_y = np.array(curr_data['top_correlation_xy'])[:, 1]
+        curr_data['top_correlation_x'] = top_corr_x
+        curr_data['top_correlation_y'] = top_corr_y
+        del curr_data['top_correlation_xy']
+        return curr_data
+
+    def get_jitter_reports(self,
+                           export=False,
+                           overwrite=False,
+                           remove_led_blinks=True,
+                           sort_on_loading=True):
 
         if (self.analysis_path / 'jitter_report_dict.pkl').exists() and overwrite is False:
             with open(self.analysis_path / 'jitter_report_dict.pkl', 'rb') as file:
                 jitter_report_dict = pickle.load(file)
                 if self.re_jitter_dict is None:
-                    self.re_jitter_dict = jitter_report_dict['left_eye']
+                    if sort_on_loading:
+                        self.re_jitter_dict = self.sort_jitter_dict(jitter_report_dict['right_eye'])
+                    else:
+                        self.re_jitter_dict = jitter_report_dict['right_eye']
                 if self.le_jitter_dict is None:
-                    self.le_jitter_dict = jitter_report_dict['right_eye']
+                    if sort_on_loading:
+                        self.le_jitter_dict = self.sort_jitter_dict(jitter_report_dict['left_eye'])
+                    else:
+                        self.le_jitter_dict = jitter_report_dict['left_eye']
                 print('jitter report loaded from analysis folder')
         else:
             # get ROI for each eye video
@@ -1372,19 +1575,35 @@ class BlockSync:
             self.re_jitter_dict = self.compute_cross_correlation(self.re_videos[0], right_eye_roi)
             self.le_jitter_dict = self.compute_cross_correlation(self.le_videos[0], left_eye_roi)
 
-            if export:
-                export_path = self.analysis_path / 'jitter_report_dict.pkl'
-                jitter_report_dict = {
+        if remove_led_blinks:
+            print('removing LED blink events...')
+            self.find_led_blink_frames(plot=True)
+            frames_to_remove_l = self.led_blink_frames_l
+            frames_to_remove_r = self.led_blink_frames_r
 
-                    'left_eye': self.le_jitter_dict,
-                    'right_eye': self.re_jitter_dict
-                }
+            r_df = pd.DataFrame.from_dict(self.re_jitter_dict)
+            r_df.iloc[frames_to_remove_r] = np.nan
+            r_df.interpolate(inplace=True)
+            l_df = pd.DataFrame.from_dict(self.le_jitter_dict)
+            l_df.loc[frames_to_remove_l] = np.nan
+            l_df.interpolate(inplace=True)
 
-                with open(export_path, 'wb') as file:
-                    pickle.dump(jitter_report_dict, file)
-                print(f'results saved to {export_path}')
+            self.le_jitter_dict = l_df.to_dict(orient='list')
+            self.re_jitter_dict = r_df.to_dict(orient='list')
 
-            print('Jitter report computed - check out re/le_jitter_dict attributes')
+        if export:
+            export_path = self.analysis_path / 'jitter_report_dict.pkl'
+            jitter_report_dict = {
+
+                'left_eye': self.le_jitter_dict,
+                'right_eye': self.re_jitter_dict
+            }
+
+            with open(export_path, 'wb') as file:
+                pickle.dump(jitter_report_dict, file)
+            print(f'results saved to {export_path}')
+
+        print('Jitter report computed - check out re/le_jitter_dict attributes')
 
     @staticmethod
     def plot_jitter_vectors(jitter_dict,
@@ -1393,7 +1612,8 @@ class BlockSync:
                             export_path=False):
         top_correlation_values = jitter_dict['top_correlation_values']
         top_correlation_dist = jitter_dict['top_correlation_dist']
-        top_correlation_xy = jitter_dict['top_correlation_xy']
+        top_correlation_x = jitter_dict['top_correlation_x']
+        top_correlation_y = jitter_dict['top_correlation_y']
 
         fig, axs = plt.subplots(3, 1, figsize=(20, 7), sharex=True, dpi=300, constrained_layout=False)
         fig.suptitle(fig_suptitle)
@@ -1412,10 +1632,12 @@ class BlockSync:
         if num_ticks is not None:
             axs[1].set_xticks(x_ticker)
         axs[1].grid(True, linestyle='dotted')
-        _ = axs[2].plot(x_axis, top_correlation_xy)
+        _ = axs[2].plot(x_axis, top_correlation_x, label='X coordinate')
+        _ = axs[2].plot(x_axis, top_correlation_y, label='Y coordinate')
         axs[2].set_title('XY coordinates of top correlation values')
         axs[2].set_ylabel('top corr coordinates')
         axs[2].set_xlabel('Seconds')
+        axs[2].legend()
         if num_ticks is not None:
             axs[2].set_xticks(x_ticker)
         axs[2].grid(True, linestyle='dotted')
@@ -1424,8 +1646,13 @@ class BlockSync:
         return fig
 
     # TODO: !!!!write the jitter correction algorithm here!!!!
-
     def correct_jitter(self):
+        """
+        This function should correct the le/re dataframes such that for every frame both the x and y coordinates
+        are shifted such that: corrected_x = reference_x - current_x
+        where the distances are those from the jitter report (which also computes drift)
+        :return:
+        """
         print('method not implemented')
         return
 
@@ -1754,7 +1981,7 @@ class BlockSync:
         """
         This function cascades over the steps that end in two dataframe objects, one for synced saccades and the other
         non-synced saccades. This function requires completion of all previous analysis steps (in particular, lizMov.mat
-        should be produced using mark's code)
+        should be produced using Mark's code)
         :param sampling_window_ms: the time window for each saccade (half before half after the saccade)
         :param ep_channel_number: a channel to get neural data from, limited to 1 for now (you can use get_data to
         draw additional channels based on timestamps from the dataframe later
@@ -1766,10 +1993,10 @@ class BlockSync:
         analysis_list = os.listdir(p)
         correct_analysis = [i for i in analysis_list if self.animal_call in i][0]
         p = p / str(correct_analysis)
-        matPath = p / 'lizMov.mat'
-        print(f'path to mat file is {matPath}')
+        mat_path = p / 'lizMov.mat'
+        print(f'path to mat file is {mat_path}')
         # read mat file
-        mat_data = h5py.File(str(matPath), 'r')
+        mat_data = h5py.File(str(mat_path), 'r')
         mat_dict = {'t_mov_ms': mat_data['t_mov_ms'][:],
                     'movAll': mat_data['movAll'][:]}
 
@@ -1885,7 +2112,9 @@ class BlockSync:
         """
         This function cascades over the steps that end in two dataframe objects, one for synced saccades and the other
         non-synced saccades. This function requires completion of all previous analysis steps (in particular, lizMov.mat
-        should be produced using mark's code) - This is the 3D projection demo version - still under construction
+        should be produced using Mark's code) - This is the 3D projection demo version - still under construction
+        :param overwrite_saccade_data: When True, will overwrite existing saccade detections
+        :param automate_saccade_detection: When True, will not prompt for a visual inspection of saccade detections
         :param sampling_window_ms: the time window for each saccade (half before half after the saccade)
         :param ep_channel_number: a channel to get neural data from, limited to 1 for now (you can use get_data to
         draw additional channels based on timestamps from the dataframe later
@@ -1916,10 +2145,10 @@ class BlockSync:
         analysis_list = os.listdir(p)
         correct_analysis = [i for i in analysis_list if self.animal_call in i][0]
         p = p / str(correct_analysis)
-        matPath = p / 'lizMov.mat'
-        print(f'path to mat file is {matPath}')
+        mat_path = p / 'lizMov.mat'
+        print(f'path to mat file is {mat_path}')
         # read mat file
-        mat_data = h5py.File(str(matPath), 'r')
+        mat_data = h5py.File(str(mat_path), 'r')
         mat_dict = {'t_mov_ms': mat_data['t_mov_ms'][:],
                     'movAll': mat_data['movAll'][:]}
 
@@ -2141,7 +2370,6 @@ class BlockSync:
             self.non_synced_saccades_df['dx'] * \
             (self.non_synced_saccades_df['eye'].map({'R': self.R_pix_size, 'L': self.L_pix_size}))
 
-
     @staticmethod
     def spherical_to_polar(yaw, pitch):
         """
@@ -2201,11 +2429,12 @@ class BlockSync:
                 # understand before and after - SHOULD THINK ABOUT THIS FOR FURTHER CORRECTION LATER
                 saccade_initiation_ind = int(len(saccade_dict[e]['x_coords'][s])) // 2
                 saccade_end_ind = saccade_initiation_ind + int(saccade_length)
-                x_before, x_after, dx = self.saccade_before_after(saccade_dict[e]['x_coords'][s][saccade_initiation_ind:saccade_end_ind+1])
-                y_before, y_after, dy = self.saccade_before_after(saccade_dict[e]['y_coords'][s][saccade_initiation_ind:saccade_end_ind+1])
+                x_before, x_after, dx = (
+                    self.saccade_before_after(saccade_dict[e]['x_coords'][s][saccade_initiation_ind:saccade_end_ind+1]))
+                y_before, y_after, dy = (
+                    self.saccade_before_after(saccade_dict[e]['y_coords'][s][saccade_initiation_ind:saccade_end_ind+1]))
 
                 s_mag, theta = self.spherical_to_polar(dx, dy)
-
 
                 # old version, with error!!!
                 """

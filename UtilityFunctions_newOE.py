@@ -14,6 +14,7 @@ from lxml import etree as ET
 import scipy.signal as sig
 import pandas as pd
 from scipy.stats import kde
+import bokeh.plotting
 
 
 def nan_helper(y):
@@ -30,7 +31,6 @@ def nan_helper(y):
 
 
 def multi_block_saccade_dict_creation_current(blocklist, sampling_window_ms, ep_channel_number):
-
     saccade_dict = {}
     # loop over the blocks from here:
     for block in blocklist:
@@ -95,7 +95,7 @@ def multi_block_saccade_dict_creation_current(blocklist, sampling_window_ms, ep_
                 # get specific saccade samples:
                 saccade_samples = ep_data[0, j, :]  # [n_channels, n_windows, nSamples]
                 # get the spectral profile for the segment
-                fs, pxx = sig.welch(saccade_samples, block.sample_rate,nperseg=16384,return_onesided=True)
+                fs, pxx = sig.welch(saccade_samples, block.sample_rate, nperseg=16384, return_onesided=True)
 
                 j0 = pre_saccade_ts[j]
                 j1 = pre_saccade_ts[j] + sampling_window_ms
@@ -109,13 +109,13 @@ def multi_block_saccade_dict_creation_current(blocklist, sampling_window_ms, ep_
                 bad_saccade = False
                 for y in [x_coords, y_coords]:
                     nan_count = np.sum(np.isnan(y.astype(float)))
-                    if nan_count > 0 :
-                        if nan_count < len(y)/2:
+                    if nan_count > 0:
+                        if nan_count < len(y) / 2:
                             # print(f'saccade at ind {i} has {nan_count} nans, interpolating...')
                             # find nan values in the vector
                             nans, z = nan_helper(y.astype(float))
                             # interpolate using the helper lambda function
-                            y[nans] = np.interp(z(nans),z(~nans),y[~nans].astype(float))
+                            y[nans] = np.interp(z(nans), z(~nans), y[~nans].astype(float))
                             # replace the interpolated values for the saccade
                             interpolated_coords.append(y)
                         else:
@@ -163,22 +163,22 @@ def sort_synced_saccades(b_dict):
     # that only has two-eyed saccades included in it...
     # first, I have to understand which rows of the dictionaries go together:
     # create a matrix of [left eye timestamp, -,left eye ind, -]
-    s_mat = np.empty([len(l_times),5])
-    s_mat[:,0] = l_times
-    s_mat[:,2] = np.arange(0,len(l_times))
+    s_mat = np.empty([len(l_times), 5])
+    s_mat[:, 0] = l_times
+    s_mat[:, 2] = np.arange(0, len(l_times))
     # find and fit the right eye times and indices on columns 1 and 3
-    for i, lt in enumerate(s_mat[:,0]):
+    for i, lt in enumerate(s_mat[:, 0]):
         array = np.abs((r_times - lt))
         ind_min_diff = np.argmin(array)
         min_diff = array[ind_min_diff]
         rt = r_times[ind_min_diff]
-        s_mat[i,3] = ind_min_diff
-        s_mat[i,1] = rt
-        s_mat[i,4] = min_diff
+        s_mat[i, 3] = ind_min_diff
+        s_mat[i, 1] = rt
+        s_mat[i, 4] = min_diff
 
     # create a dataframe for queries and testing, define a threshold and remove non sync saccades
-    s_df = pd.DataFrame(s_mat,columns=['lt','rt','left_ind','right_ind','diff'])
-    threshold = 1400 # 70 ms to consider a saccade simultaneous
+    s_df = pd.DataFrame(s_mat, columns=['lt', 'rt', 'left_ind', 'right_ind', 'diff'])
+    threshold = 1400  # 70 ms to consider a saccade simultaneous
     s_df = s_df.query('diff<@threshold')
     ind_dict = {
         'L': s_df['left_ind'].values,
@@ -233,7 +233,7 @@ def saccade_before_after(coords):
     else:
         before = coords[min_ind]
         after = coords[max_ind]
-    delta = after-before
+    delta = after - before
     return before, after, delta
 
 
@@ -259,7 +259,7 @@ def saccade_dict_enricher(saccade_dict):
                 y_before, y_after, dy = saccade_before_after(sync_saccades[e]['y_coords'][s])
 
                 # calculate magnitude (euclidean)
-                s_mag = np.sqrt(dx**2 + dy**2)
+                s_mag = np.sqrt(dx ** 2 + dy ** 2)
 
                 # get direction quadrant
                 if dx > 0 and dy > 0:
@@ -271,8 +271,8 @@ def saccade_dict_enricher(saccade_dict):
                 elif dx > 0 > dy:
                     quad = 3
                 # get direction (theta calculated from quadrent border)
-                degrees_in_quadrent = np.rad2deg(np.arctan(np.abs(dy)/np.abs(dx)))
-                theta = degrees_in_quadrent + (quad*90)
+                degrees_in_quadrent = np.rad2deg(np.arctan(np.abs(dy) / np.abs(dx)))
+                theta = degrees_in_quadrent + (quad * 90)
 
                 # collect into dict
                 sync_saccades[e]['dx'].append(dx)
@@ -284,7 +284,6 @@ def saccade_dict_enricher(saccade_dict):
 
 
 def parse_dataset_to_df(saccade_dict, blocklist):
-
     date_list = [block.oe_dirname[-19:] for block in blocklist]
     num_list = [block.block_num for block in blocklist]
     num_date_dict = dict(zip(num_list, date_list))
@@ -293,10 +292,10 @@ def parse_dataset_to_df(saccade_dict, blocklist):
     d = saccade_dict
     index_counter = 0
     for k in d.keys():
-        block = d[k] # in a certain block
+        block = d[k]  # in a certain block
         for e in block.keys():
             eye = block[e]  # in one of the eyes
-            for row in range(len(eye['samples'])): # for each saccade
+            for row in range(len(eye['samples'])):  # for each saccade
                 for col in eye.keys():  # for each columm
                     v = eye[col][row]  # get value of location
                     df.at[index_counter, 'block'] = k
@@ -310,15 +309,16 @@ def parse_dataset_to_df(saccade_dict, blocklist):
 
 
 def plot_kde(ax, x, y, nbins, title, xlim=False, ylim=False, global_max=None, global_min=None):
-    k = kde.gaussian_kde(np.array([x,y]).astype(np.float))
+    k = kde.gaussian_kde(np.array([x, y]).astype(np.float))
 
     if global_max and global_min:
-        minimal_coordinate= global_min
+        minimal_coordinate = global_min
         maximal_coordinate = global_max
     else:
-        minimal_coordinate= min([x.min(),y.min()])
-        maximal_coordinate = max([x.max(),y.max()])
-    xi, yi = np.mgrid[minimal_coordinate:maximal_coordinate:nbins*1j, minimal_coordinate:maximal_coordinate:nbins*1j]
+        minimal_coordinate = min([x.min(), y.min()])
+        maximal_coordinate = max([x.max(), y.max()])
+    xi, yi = np.mgrid[minimal_coordinate:maximal_coordinate:nbins * 1j,
+             minimal_coordinate:maximal_coordinate:nbins * 1j]
     zi = k(np.vstack([xi.flatten(), yi.flatten()]))
     ax.set_title(str(title))
     sp = ax.pcolormesh(xi, yi, zi.reshape(xi.shape), shading='gouraud', cmap=plt.cm.jet)
@@ -326,7 +326,7 @@ def plot_kde(ax, x, y, nbins, title, xlim=False, ylim=False, global_max=None, gl
         ax.set_xlim(xlim)
     if ylim:
         ax.set_ylim(ylim)
-    ax.set_aspect('equal','box')
+    ax.set_aspect('equal', 'box')
     return sp
 
 
@@ -353,8 +353,8 @@ def block_generator(block_numbers, experiment_path, animal, bad_blocks=[], regev
                     if int(block_number) in block_numbers and int(block_number) not in bad_blocks:
                         # block definition
                         block = BlockSync(animal_call=animal,
-                                          experiment_date=date,block_num=block_number,
-                                          path_to_animal_folder=str(experiment_path),regev=regev)
+                                          experiment_date=date, block_num=block_number,
+                                          path_to_animal_folder=str(experiment_path), regev=regev)
                         block_collection.append(block)
                 except ValueError:
                     continue
@@ -381,7 +381,7 @@ def create_video_from_segments(segments_df, blocklist, export_path):
     # define the video writer
     vid_out = cv2.VideoWriter(str(export_path),
                               cv2.VideoWriter_fourcc('H', '2', '6', '4'),
-                              60.0, (640*2, 480))  # set the frame size to be two vid's worth
+                              60.0, (640 * 2, 480))  # set the frame size to be two vid's worth
 
     # for each block of the dataframe (each segment):
     for b in np.unique(df['block'].values):
@@ -453,3 +453,33 @@ def create_video_from_segments(segments_df, blocklist, export_path):
         lcap.release()
     vid_out.release()
     cv2.destroyAllWindows()
+
+
+def data_cleanup(data, bad_indices, interpolate=False):
+    """
+    Performs data cleanup on a 1D data vector.
+
+    Args:
+        data: A 1D data vector.
+        bad_indices: An array of indices where bad data is located.
+        interpolate: A binary variable indicating whether to interpolate bad data values.
+
+    Returns:
+        A 1D data vector with either NaN or interpolated values (according to the interpolate binary variable)
+    """
+
+    # Create a copy of the data vector to avoid modifying the original
+    data_cleaned = data.copy()
+
+    # Replace bad values with NaN
+    data_cleaned[bad_indices] = np.nan
+
+    # Interpolate bad values if necessary
+    if interpolate:
+        # Create a boolean mask of the bad indices
+        bad_mask = np.isnan(data_cleaned)
+
+        # Interpolate the bad values using the values before and after them
+        data_cleaned[bad_mask] = np.interp(bad_indices, np.where(~bad_mask)[0], data_cleaned[~bad_mask])
+
+    return data_cleaned
