@@ -1645,7 +1645,6 @@ class BlockSync:
             fig.savefig(export_path)
         return fig
 
-    # TODO: !!!!write the jitter correction algorithm here!!!!
     def correct_jitter(self):
         """
         This function should correct the le/re dataframes such that for every frame both the x and y coordinates
@@ -1653,7 +1652,85 @@ class BlockSync:
         where the distances are those from the jitter report (which also computes drift)
         :return:
         """
-        print('method not implemented')
+
+        # for each eye, get the median displacement vector -> create a synced version of the correction
+        # according to previous sync -> perform column based addition / subtraction to correct the jitter
+        # -> measure std decline to validate correction
+        # right eye:
+        rx_median_series = pd.Series(signal.medfilt(self.re_jitter_dict['x_displacement'], kernel_size=13),
+                                     name='x_correction')
+        ry_median_series = pd.Series(signal.medfilt(self.re_jitter_dict['y_displacement'], kernel_size=13),
+                                     name='y_correction')
+        r_correction_df = pd.concat([ry_median_series, rx_median_series], axis=1)
+        r_corrected = self.re_df[['Arena_TTL', 'R_eye_frame', 'center_y', 'center_x']].set_index('R_eye_frame').merge(
+            r_correction_df,
+            how='left',
+            left_index=True,
+            right_index=True)
+        r_corrected['center_y_corrected'] = r_corrected['center_y'] + r_corrected['y_correction']
+        r_corrected['center_x_corrected'] = r_corrected['center_x'] - r_corrected['x_correction']
+
+        print('The right eye std of the X coord was', np.std(r_corrected['center_x']))
+        print('After correction it is:', np.std(r_corrected['center_x_corrected']))
+        print('The right eye std of the Y coord was', np.std(r_corrected['center_y']))
+        print('After correction it is:', np.std(r_corrected['center_y_corrected']))
+        # left eye:
+        lx_median_series = pd.Series(signal.medfilt(self.le_jitter_dict['x_displacement'], kernel_size=13),
+                                     name='x_correction')
+        ly_median_series = pd.Series(signal.medfilt(self.le_jitter_dict['y_displacement'], kernel_size=13),
+                                     name='y_correction')
+        l_correction_df = pd.concat([ly_median_series, lx_median_series], axis=1)
+        l_corrected = self.le_df[['Arena_TTL', 'L_eye_frame', 'center_x', 'center_y']].set_index('L_eye_frame').merge(
+            l_correction_df,
+            how='left',
+            left_index=True,
+            right_index=True)
+        l_corrected['center_y_corrected'] = l_corrected['center_y'] + l_corrected['y_correction']
+        l_corrected['center_x_corrected'] = l_corrected['center_x'] + l_corrected['x_correction']
+
+        print('\n The left eye std of the X coord was', np.std(l_corrected['center_x']))
+        print('After correction it is:', np.std(l_corrected['center_x_corrected']))
+        print('\n The left eye std of the Y coord was', np.std(l_corrected['center_y']))
+        print('After correction it is:', np.std(l_corrected['center_y_corrected']))
+
+        self.re_df = self.re_df.set_index('Arena_TTL').merge(
+            r_corrected[['Arena_TTL', 'center_x_corrected', 'center_y_corrected']].set_index('Arena_TTL'),
+            how='left',
+            left_index=True,
+            right_index=True)
+        self.le_df = self.le_df.set_index('Arena_TTL').merge(
+            l_corrected[['Arena_TTL', 'center_x_corrected', 'center_y_corrected']].set_index('Arena_TTL'),
+            how='left',
+            left_index=True,
+            right_index=True)
+        return
+
+    def remove_led_blinks_from_eye_df(self, export=True):
+        """Basic function for removing the blink frames datapoints from le/re_df"""
+
+        columns_to_nan = ['center_x',
+                          'center_y',
+                          'center_y_corrected',
+                          'center_x_corrected',
+                          'phi',
+                          'ellipse_size',
+                          'width',
+                          'height']
+        for col in columns_to_nan:
+            if col not in self.re_df.columns:
+                print(f'missing column {col}, come back when the dataframe is ready, run the jitter correction func')
+                return
+        if self.led_blink_frames_r is not None and self.led_blink_frames_l is not None:
+            self.re_df.loc[self.re_df['R_eye_frame'].isin(self.led_blink_frames_r), columns_to_nan] = np.nan
+            self.le_df.loc[self.le_df['L_eye_frame'].isin(self.led_blink_frames_l), columns_to_nan] = np.nan
+            print('removed led blink data from le / re dataframes')
+            if export:
+                self.re_df.to_csv(self.analysis_path / 're_df.csv')
+                self.le_df.to_csv(self.analysis_path / 'le_df.csv')
+                print('exported nan filled dataframes to csv')
+        else:
+            print('run "find_led_blink_frames" first!')
+
         return
 
     def block_eye_plot(self, export=False, ms_x_axis=True, plot_saccade_locs=False,
