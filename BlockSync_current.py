@@ -1231,10 +1231,20 @@ class BlockSync:
             print('eye dataframes loaded from analysis folder')
             return
 
-        # find the dlc files
-        pl = [i for i in os.listdir(self.l_e_path) if 'DLC' in i and '.csv' in i][0]
+        # find the dlc files, check for filtered results
+        pl = [i for i in os.listdir(self.l_e_path) if 'DLC' in i and '.csv' in i]
+        if len(pl) > 1:
+            pl = [i for i in pl if 'filtered' in i][0]
+        else:
+            pl = pl[0]
         self.le_csv = pd.read_csv(self.l_e_path / pl, header=1)
-        pr = [i for i in os.listdir(self.r_e_path) if 'DLC' in i and '.csv' in i][0]
+
+        pr = [i for i in os.listdir(self.r_e_path) if 'DLC' in i and '.csv' in i]
+        if len(pr) > 1:
+            print(pr)
+            pr = [i for i in pr if 'filtered' in i][0]
+        else:
+            pr = pr[0]
         self.re_csv = pd.read_csv(self.r_e_path / pr, header=1)
 
         # perform eye tracking analysis for each eye frame
@@ -1550,7 +1560,8 @@ class BlockSync:
                            export=False,
                            overwrite=False,
                            remove_led_blinks=True,
-                           sort_on_loading=True):
+                           sort_on_loading=True,
+                           roi_dict=None):
 
         if (self.analysis_path / 'jitter_report_dict.pkl').exists() and overwrite is False:
             with open(self.analysis_path / 'jitter_report_dict.pkl', 'rb') as file:
@@ -1567,9 +1578,14 @@ class BlockSync:
                         self.le_jitter_dict = jitter_report_dict['left_eye']
                 print('jitter report loaded from analysis folder')
         else:
-            # get ROI for each eye video
-            left_eye_roi = self.get_roi_for_correlation(self.le_videos[0])
-            right_eye_roi = self.get_roi_for_correlation(self.re_videos[0])
+            if roi_dict is not None:
+                # read pre-determined rois for each video
+                left_eye_roi = roi_dict['left_roi']
+                right_eye_roi = roi_dict['right_roi']
+            else:
+                # prompt the user for an ROI for each eye video
+                left_eye_roi = self.get_roi_for_correlation(self.le_videos[0])
+                right_eye_roi = self.get_roi_for_correlation(self.re_videos[0])
 
             # run the algorithm
             self.re_jitter_dict = self.compute_cross_correlation(self.re_videos[0], right_eye_roi)
