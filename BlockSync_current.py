@@ -28,7 +28,6 @@ This script defines the BlockSync class which takes all of the relevant data for
 to produce a synchronized dataframe for all video sources to be used for further analysis
 '''
 
-
 # noinspection SpellCheckingInspection
 class BlockSync:
     """
@@ -1223,8 +1222,12 @@ class BlockSync:
         """
         # if the dataframes already exist, read them
         if (self.analysis_path / 're_df.csv').exists() and (self.analysis_path / 'le_df.csv').exists():
-            self.re_df = pd.read_csv(self.analysis_path / 're_df.csv', index_col=0)
-            self.le_df = pd.read_csv(self.analysis_path / 'le_df.csv', index_col=0)
+            self.re_df = pd.read_csv(self.analysis_path / 're_df.csv', index_col=0).reset_index()
+            if 'Unnamed: 0' in self.re_df.columns:
+                self.re_df = self.re_df.drop(axis=1, labels='Unnamed: 0')
+            self.le_df = pd.read_csv(self.analysis_path / 'le_df.csv', index_col=0).reset_index()
+            if 'Unnamed: 0' in self.le_df.columns:
+                self.le_df = self.le_df.drop(axis=1, labels='Unnamed: 0')
             # append ms_axis to df
             self.re_df['ms_axis'] = self.re_df['Arena_TTL'] / 20
             self.le_df['ms_axis'] = self.le_df['Arena_TTL'] / 20
@@ -1549,11 +1552,12 @@ class BlockSync:
     def sort_jitter_dict(jitter_dict):
         """an internal method to sort out some mass"""
         curr_data = jitter_dict
-        top_corr_x = np.array(curr_data['top_correlation_xy'])[:, 0]
-        top_corr_y = np.array(curr_data['top_correlation_xy'])[:, 1]
-        curr_data['top_correlation_x'] = top_corr_x
-        curr_data['top_correlation_y'] = top_corr_y
-        del curr_data['top_correlation_xy']
+        if 'top_correlation_xy' in curr_data.keys():
+            top_corr_x = np.array(curr_data['top_correlation_xy'])[:, 0]
+            top_corr_y = np.array(curr_data['top_correlation_xy'])[:, 1]
+            curr_data['top_correlation_x'] = top_corr_x
+            curr_data['top_correlation_y'] = top_corr_y
+            del curr_data['top_correlation_xy']
         return curr_data
 
     def get_jitter_reports(self,
@@ -1714,11 +1718,13 @@ class BlockSync:
             how='left',
             left_index=True,
             right_index=True)
+        self.re_df = self.re_df.reset_index()
         self.le_df = self.le_df.set_index('Arena_TTL').merge(
             l_corrected[['Arena_TTL', 'center_x_corrected', 'center_y_corrected']].set_index('Arena_TTL'),
             how='left',
             left_index=True,
             right_index=True)
+        self.le_df = self.le_df.reset_index()
         return
 
     def remove_led_blinks_from_eye_df(self, export=True):
@@ -1832,6 +1838,7 @@ class BlockSync:
     def saccade_event_analayzer(self, threshold=2, automatic=False, overwrite=False):
         """
         This method first finds the speed of the pupil in each frame, then detects saccade events
+        :param overwrite:
         :param automatic: when set to true, will go with the given threshold and not prompt the user for input,
         might create a wrongly thresholded dataset - use with caution
         :param threshold: The velocity threshold value to use
@@ -1854,7 +1861,8 @@ class BlockSync:
             return
 
         # This section is a trial & error iteration with a dialogue to determine correct thresholding values
-
+        l_saccades = None
+        r_saccades = None
         flag = 0
         while flag == 0:
             # This segment gets saccades according to a given threshold
@@ -1927,7 +1935,7 @@ class BlockSync:
                 start_conditions = self.re_df.iloc[self.re_df['ms_axis'].isin(start).values]
                 end_conditions = self.re_df.iloc[self.re_df['ms_axis'].isin(end).values]
 
-            # This segment deals with getting the euclidean distance without trying to take the sqrt of 0:
+            # This segment deals with getting the Euclidean distance without trying to take the sqrt of 0:
             dist_squared = ((start_conditions['center_x'].values - end_conditions['center_x'].values) ** 2) + \
                            ((start_conditions['center_y'].values - end_conditions['center_y'].values) ** 2)
             sqrt_values = np.sqrt(dist_squared[dist_squared != 0].astype(float))
@@ -1952,7 +1960,7 @@ class BlockSync:
         :param block: BlockSync object of a trial with eye videos
         :param known_dist: The distance to use for calibration measured in mm
         :param overwrite: If True will run the method even if the output df already exists
-        :return: L and R values for pixel real-world size
+        :return: L and R values for pixel real-world size [in mm]
         """
         # first check if this calibration already exists for the block:
         if not overwrite:
@@ -1974,8 +1982,10 @@ class BlockSync:
         rcap.set(1, 1)
         rret, rframe = rcap.read()
         if rret and lret:
-            Rroi = cv2.selectROI("select the area of the known measurement through the diagonal of the ROI", rframe)
-            Lroi = cv2.selectROI("select the area of the known measurement through the diagonal of the ROI", lframe)
+            Rroi = cv2.selectROI(
+                "select the area of the known measurement through the diagonal of the ROI", rframe)
+            Lroi = cv2.selectROI(
+                "select the area of the known measurement through the diagonal of the ROI", lframe)
         else:
             print('some trouble with the video retrieval, check paths and try again')
         R_dist = np.sqrt(Rroi[2] ** 2 + Rroi[3] ** 2)
@@ -2029,7 +2039,6 @@ class BlockSync:
             del session
         print('got it!')
 
-
     @staticmethod
     def nan_helper(y):
         """Helper to handle indices and logical indices of NaNs.
@@ -2075,6 +2084,8 @@ class BlockSync:
         This function cascades over the steps that end in two dataframe objects, one for synced saccades and the other
         non-synced saccades. This function requires completion of all previous analysis steps (in particular, lizMov.mat
         should be produced using Mark's code)
+        :param overwrite_saccade_data:
+        :param automate_saccade_detection:
         :param sampling_window_ms: the time window for each saccade (half before half after the saccade)
         :param ep_channel_number: a channel to get neural data from, limited to 1 for now (you can use get_data to
         draw additional channels based on timestamps from the dataframe later
@@ -2529,24 +2540,6 @@ class BlockSync:
 
                 s_mag, theta = self.spherical_to_polar(dx, dy)
 
-                # old version, with error!!!
-                """
-                s_mag = np.sqrt(dx ** 2 + dy ** 2)
-                
-                # get direction quadrant
-                if dx > 0 and dy > 0:
-                    quad = 0
-                elif dx < 0 < dy:
-                    quad = 1
-                elif dx < 0 and dy < 0:
-                    quad = 2
-                elif dx > 0 > dy:
-                    quad = 3
-                # get direction (theta calculated from quadrent border)
-                degrees_in_quadrent = np.rad2deg(np.arctan(np.abs(dy) / np.abs(dx)))
-                theta = degrees_in_quadrent + (quad * 90)
-                """
-
                 # collect into dict
                 saccade_dict[e]['dx'].append(dx)
                 saccade_dict[e]['dy'].append(dy)
@@ -2558,5 +2551,4 @@ class BlockSync:
                 saccade_dict[e]['saccade_termination_y'].append(y_after)
 
         return saccade_dict
-
 
