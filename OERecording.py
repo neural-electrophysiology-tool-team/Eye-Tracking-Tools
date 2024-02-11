@@ -373,7 +373,7 @@ class OERecording:
         if not channels:  # if no channels were provided
             channels = self.analogChannelNumbers
 
-        if not all([c in self.channelNumbers for c in channels]):  # if requested channels do not exist in the file
+        if not all([c in self.analogChannelNumbers for c in channels]):  # if requested channels do not exist in the file
             raise ValueError('one or more of the entered channels does not exist in the recording!')
         n_ch = len(channels)
 
@@ -463,7 +463,7 @@ class OERecording:
         data_matrix = np.transpose(data_matrix, [2, 1, 0])
 
         if convert_to_mv:
-            data_matrix = data_matrix * self.MicrovoltsPerAD[-1]
+            data_matrix = data_matrix * self.MicrovoltsPerADAnalog[-1] / 1000
 
         if return_timestamps:
             timestamps = np.tile(np.arange(window_samples) * self.sample_ms, (n_windows, 1))

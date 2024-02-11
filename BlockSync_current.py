@@ -22,13 +22,54 @@ from scipy.signal import welch, fftconvolve
 from scipy.stats import zscore as scipy_zscore
 from scipy.signal import find_peaks as scipy_find_peaks
 from matplotlib import pyplot as plt
-
+import bokeh
+from itertools import cycle
 '''
 This script defines the BlockSync class which takes all of the relevant data for a given trial and can be utilized
 to produce a synchronized dataframe for all video sources to be used for further analysis
 '''
 
 # noinspection SpellCheckingInspection
+
+
+def bokeh_plotter(data_list, label_list,
+                  plot_name='default',
+                  x_axis='X', y_axis='Y',
+                  peaks=None, export_path=False):
+    """Generates an interactive Bokeh plot for the given data vector.
+    Args:
+        data_list (list or array): The data to be plotted.
+        label_list (list of str): The labels of the data vectors
+        plot_name (str, optional): The title of the plot. Defaults to 'default'.
+        x_axis (str, optional): The label for the x-axis. Defaults to 'X'.
+        y_axis (str, optional): The label for the y-axis. Defaults to 'Y'.
+        peaks (list or array, optional): Indices of peaks to highlight on the plot. Defaults to None.
+        export_path (False or str): when set to str, will output the resulting html fig
+    """
+    color_cycle = cycle(bokeh.palettes.Category10_10)
+    fig = bokeh.plotting.figure(title=f'bokeh explorer: {plot_name}',
+                                x_axis_label=x_axis,
+                                y_axis_label=y_axis,
+                                plot_width=1500,
+                                plot_height=700)
+
+    for i, vec in enumerate(range(len(data_list))):
+        color = next(color_cycle)
+        data_vector = data_list[vec]
+        if label_list is None:
+            fig.line(range(len(data_vector)), data_vector, line_color=color, legend_label=f"Line {len(fig.renderers)}")
+        elif len(label_list) == len(data_list):
+            fig.line(range(len(data_vector)), data_vector, line_color=color, legend_label=f"{label_list[i]}")
+
+    if peaks is not None:
+        fig.circle(peaks, data_vector[peaks], size=10, color='red')
+
+    if export_path is not False:
+        print(f'exporting to {export_path}')
+        bokeh.io.output.output_file(filename=str(export_path / f'{plot_name}.html'), title=f'{plot_name}')
+    bokeh.plotting.show(fig)
+
+
 class BlockSync:
     """
     This class designed to allow parsing and synchronization of the different files acquired in a given experimental
@@ -37,9 +78,9 @@ class BlockSync:
      where each block contains the next structure:
      Animal_call
           ||
-          Date(yyyy_mm_dd) >> block_x
+          Date(yyyy_mm_dd) >> block_xxx
                         ||
-                Arena_videos -> reptilearn output
+                Arena_videos -> external arena outputs
                 eye_videos -> LE/RE -> video_folder -> video.h264 + .mp4, DLC analysis file.csv, timestamps.csv
                 oe_files ->  open ephys output
                 analysis -> empty
@@ -1668,11 +1709,15 @@ class BlockSync:
     def correct_jitter(self):
         """
         This function should correct the le/re dataframes such that for every frame both the x and y coordinates
-        are shifted such that: corrected_x = reference_x - current_x
-        where the distances are those from the jitter report (which also computes drift)
+        are shifted such that: corrected_x = original_x - median filtered displacement (from the jitter report)
+        if verification_plot is True, prints out a report of before and after x_y coords for both eyes
         :return:
         """
 
+        # first, check if this has already been done:
+        if 'center_x_corrected' in self.re_df.columns:
+            print('center_x_corrected already exists, no need to re-run jitter correction')
+            pass
         # for each eye, get the median displacement vector -> create a synced version of the correction
         # according to previous sync -> perform column based addition / subtraction to correct the jitter
         # -> measure std decline to validate correction
@@ -1688,7 +1733,7 @@ class BlockSync:
             left_index=True,
             right_index=True)
         r_corrected['center_y_corrected'] = r_corrected['center_y'] + r_corrected['y_correction']
-        r_corrected['center_x_corrected'] = r_corrected['center_x'] - r_corrected['x_correction']
+        r_corrected['center_x_corrected'] = r_corrected['center_x'] + r_corrected['x_correction']
 
         print('The right eye std of the X coord was', np.std(r_corrected['center_x']))
         print('After correction it is:', np.std(r_corrected['center_x_corrected']))
@@ -1752,6 +1797,48 @@ class BlockSync:
                 print('exported nan filled dataframes to csv')
         else:
             print('run "find_led_blink_frames" first!')
+
+        return
+
+    def remove_eye_datapoints_based_on_video_frames(self, eye, indices_to_nan=np.array([]), export=False):
+        """
+
+        :param eye: The eye to remove indices from, either 'left' or 'right'
+        :param indices_to_nan: numpy array of video frame numbers (indices) to remove from the dataframe
+        :param export: if true, updates the corrected dataframe to a csv file
+        :return:
+
+        """
+
+        if eye not in ['left', 'right']:
+            print('eye can only be either "left" or "right"')
+            return None
+
+        columns_to_nan = ['center_x',
+                          'center_y',
+                          'center_y_corrected',
+                          'center_x_corrected',
+                          'phi',
+                          'ellipse_size',
+                          'width',
+                          'height']
+
+        if eye == 'left':
+            self.le_df.loc[self.le_df['L_eye_frame'].isin(indices_to_nan), columns_to_nan] = np.nan
+
+        elif eye == 'right':
+            self.re_df.loc[self.re_df['R_eye_frame'].isin(indices_to_nan), columns_to_nan] = np.nan
+
+        print(f'removed {len(indices_to_nan)} from the {eye} eye dataframe')
+
+        if export:
+            if export:
+                if eye == 'left':
+                    self.le_df.to_csv(self.analysis_path / 'le_df.csv')
+                elif eye == 'right':
+                    self.re_df.to_csv(self.analysis_path / 're_df.csv')
+
+                    print('exported nan filled dataframes to csv')
 
         return
 
