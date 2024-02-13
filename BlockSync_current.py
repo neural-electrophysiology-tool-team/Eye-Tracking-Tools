@@ -1785,9 +1785,9 @@ class BlockSync:
                           'height']
         for col in columns_to_nan:
             if col not in self.re_df.columns:
-                print(f'missing column {col}, come back when the dataframe is ready, \n \n \n '
+                raise ValueError(f'missing column {col}, come back when the dataframe is ready, \n \n \n '
                       f'run the jitter correction func !!!!')
-                return
+
         if self.led_blink_frames_r is not None and self.led_blink_frames_l is not None:
             self.re_df.loc[self.re_df['R_eye_frame'].isin(self.led_blink_frames_r), columns_to_nan] = np.nan
             self.le_df.loc[self.le_df['L_eye_frame'].isin(self.led_blink_frames_l), columns_to_nan] = np.nan
