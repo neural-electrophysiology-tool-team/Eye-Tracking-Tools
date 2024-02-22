@@ -247,6 +247,10 @@ class BlockSync:
         self.led_blink_frames_r = None
         self.le_jitter_dict = None
         self.re_jitter_dict = None
+        self.left_rotation_matrix = None
+        self.left_rotation_angle = None
+        self.right_rotation_matrix = None
+        self.right_rotation_angle = None
 
     def __str__(self):
         return str(f'{self.animal_call}, block {self.block_num}, on {self.exp_date_time}')
@@ -1311,11 +1315,60 @@ class BlockSync:
             self.re_df.to_csv(self.analysis_path / 're_df.csv')
             self.le_df.to_csv(self.analysis_path / 'le_df.csv')
 
+    def calibrate_pixel_size(self, known_dist, overwrite=False):
+        """
+        This function takes in a known distance in mm and returns a calculation of the pixel size in each video
+        according to an ROI of given known distance in the L/R frames
+        :param block: BlockSync object of a trial with eye videos
+        :param known_dist: The distance to use for calibration measured in mm
+        :param overwrite: If True will run the method even if the output df already exists
+        :return: L and R values for pixel real-world size [in mm]
+        """
+        # first check if this calibration already exists for the block:
+        if not overwrite:
+            if (self.analysis_path / 'LR_pix_size.csv').exists():
+                internal_df = pd.read_csv(self.analysis_path / 'LR_pix_size.csv')
+                self.L_pix_size = internal_df.at[0, 'L_pix_size']
+                self.R_pix_size = internal_df.at[0, 'R_pix_size']
+                print("got the calibration values from the analysis folder")
+                return
+
+        # get the first frames of both eyes as reference images
+        # define the eye VideoCaptures
+        rcap = cv2.VideoCapture(self.re_videos[0])
+        lcap = cv2.VideoCapture(self.le_videos[0])
+
+        # get the second frames:
+        lcap.set(1, 1)
+        lret, lframe = lcap.read()
+        rcap.set(1, 1)
+        rret, rframe = rcap.read()
+        if rret and lret:
+            Rroi = cv2.selectROI(
+                "select the area of the known measurement through the diagonal of the ROI", rframe)
+            Lroi = cv2.selectROI(
+                "select the area of the known measurement through the diagonal of the ROI", lframe)
+        else:
+            print('some trouble with the video retrieval, check paths and try again')
+        R_dist = np.sqrt(Rroi[2] ** 2 + Rroi[3] ** 2)
+        L_dist = np.sqrt(Lroi[2] ** 2 + Lroi[3] ** 2)
+
+        self.L_pix_size = known_dist / L_dist
+        self.R_pix_size = known_dist / R_dist
+
+        cv2.destroyAllWindows()
+
+        # save these values to a dataframe for re-initializing the block:
+        internal_df = pd.DataFrame(columns=['L_pix_size','R_pix_size'])
+        internal_df.at[0, 'L_pix_size'] = self.L_pix_size
+        internal_df.at[0, 'R_pix_size'] = self.R_pix_size
+        internal_df.to_csv(self.analysis_path / 'LR_pix_size.csv', index=False)
+        print(f'exported to {self.analysis_path / "LR_pix_size.csv"}')
+
     # jitter detection algorithm starts here:
 
     # The following functions deal with robustly removing lights-out frames from the video jitter analysis, could
     # expand these indices to bad video frame removal later:
-
     @staticmethod
     def rolling_window_z_scores(data, roll_w_size=120):
         """
@@ -1717,7 +1770,7 @@ class BlockSync:
         # first, check if this has already been done:
         if 'center_x_corrected' in self.re_df.columns:
             print('center_x_corrected already exists, no need to re-run jitter correction')
-            pass
+            return
         # for each eye, get the median displacement vector -> create a synced version of the correction
         # according to previous sync -> perform column based addition / subtraction to correct the jitter
         # -> measure std decline to validate correction
@@ -1771,6 +1824,80 @@ class BlockSync:
             right_index=True)
         self.le_df = self.le_df.reset_index()
         return
+
+    @staticmethod
+    def add_intermediate_elements(input_vector, gap_to_bridge):
+        # Step 1: Calculate differences between each element
+        differences = np.diff(input_vector)
+
+        # Step 2: Add intervening elements based on the diff_threshold
+        output_vector = [input_vector[0]]
+        for i, diff in enumerate(differences):
+            if diff < gap_to_bridge:
+                # Add intervening elements
+                output_vector.extend(range(input_vector[i] + 1, input_vector[i + 1]))
+
+            # Add the next element from the original vector
+            output_vector.append(input_vector[i + 1])
+
+        return np.sort(np.unique(output_vector))
+
+    def find_jittery_frames(self, eye, max_distance, diff_threshold, gap_to_bridge=6):
+
+        # input checks
+        if eye not in ['left', 'right']:
+            print(f'eye can only be left/right, your input: {eye}')
+            return None
+        # eye setup
+        if eye == 'left':
+            jitter_dict = self.le_jitter_dict
+            eye_frame_col = 'L_eye_frame'
+        elif eye == 'right':
+            jitter_dict = self.re_jitter_dict
+            eye_frame_col = 'R_eye_frame'
+
+        df_dict = {'left': self.le_df,
+                   'right': self.re_df}
+
+        df = pd.DataFrame.from_dict(jitter_dict)
+        indices_of_highest_drift = df.query("top_correlation_dist > @max_distance").index.values
+        diff_vec = np.diff(df['top_correlation_dist'].values)
+        diff_peaks_indices = np.where(diff_vec > diff_threshold)[0]
+        video_indices = np.concatenate((diff_peaks_indices, indices_of_highest_drift))
+        print(f'the diff based jitter frame exclusion gives: {np.shape(diff_peaks_indices)}')
+        print(f'the threshold based jitter frame exclusion gives: {np.shape(indices_of_highest_drift)}')
+
+        # creates a bridged version of the overly jittery frames (to contend with single frame outliers)
+        video_indices = self.add_intermediate_elements(video_indices, gap_to_bridge=gap_to_bridge)
+
+        # This is the input you should give to the BlockSync.remove_eye_datapoints function
+        # (which already maps it to the df)
+
+        # translates the video indices to le/re dataframe rows
+        df_indices_to_remove = df_dict[eye].loc[df_dict[eye][eye_frame_col].isin(video_indices)].index.values
+
+        return df_indices_to_remove, video_indices
+
+    def verify_large_jitter_removal_parameters(self, eye, max_distance, diff_threshold, gap_to_bridge=6):
+        df_inds_to_remove, video_indices = self.find_jittery_frames(eye=eye,
+                                                                    max_distance=max_distance,
+                                                                    diff_threshold=diff_threshold,
+                                                                    gap_to_bridge=6)
+        if eye == 'left':
+            df = pd.DataFrame.from_dict(self.le_jitter_dict)
+        elif eye == 'right':
+            df = pd.DataFrame.from_dict(self.re_jitter_dict)
+
+        self.bokeh_plotter([df.top_correlation_dist], ['drift_distance'], peaks=video_indices)
+        print('If these parameters produce good results, run the "remove_large_jitter" function with them')
+
+    def remove_large_jitter(self, eye, max_distance, diff_threshold, gap_to_bridge=6):
+        df_inds_to_remove, video_indices = self.find_jittery_frames(eye=eye,
+                                                                    max_distance=max_distance,
+                                                                    diff_threshold=diff_threshold,
+                                                                    gap_to_bridge=6)
+
+        self.remove_eye_datapoints_based_on_video_frames(eye,indices_to_nan=video_indices)
 
     def remove_led_blinks_from_eye_df(self, export=True):
         """Basic function for removing the blink frames datapoints from le/re_df"""
@@ -1843,6 +1970,218 @@ class BlockSync:
 
         return
 
+    # This is where the dataframe rotation functions are:
+
+    @staticmethod
+    def rotate_frame_to_horizontal_with_interpolation(path_to_video_file, frame_number, ellipse_df, xflip=True,
+                                                      output_path=None):
+        """
+        Rotate the specified frame from a video file to horizontal orientation with interpolation.
+
+        Parameters:
+        - path_to_video_file (str): Path to the video file.
+        - frame_number (int): Frame number to be processed.
+        - ellipse_df (pd.DataFrame): DataFrame containing ellipse parameters for each frame.
+        - xflip (bool, optional): Flag to horizontally flip the frame (default is True).
+        - output_path (str, optional): Path to save the output video file (default is None).
+
+        Returns:
+        - rotation_matrix (np.ndarray): The rotation matrix used for the transformation.
+        - angle (float): The rotation angle applied to the frame.
+        """
+        # Read the video file
+        cap = cv2.VideoCapture(path_to_video_file)
+
+        # Check if the video file is opened successfully
+        if not cap.isOpened():
+            print("Error: Unable to open video file.")
+            return None
+
+        # Set the frame position
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+
+        # Read the frame
+        ret, frame = cap.read()
+
+        # Check if the frame is read successfully
+        if not ret:
+            print(f"Error: Unable to read frame {frame_number}.")
+            cap.release()
+            return None
+
+        # horizontally flip frame if applicable:
+        if xflip:
+            frame = cv2.flip(frame, 1)
+
+        # get the original ellipse from the block dataframe
+        if 'R_eye_frame' in ellipse_df.columns:
+            current_frame_data = ellipse_df.iloc[ellipse_df.query('R_eye_frame == @frame_number').index[0]]
+        elif 'L_eye_frame' in ellipse_df.columns:
+            current_frame_data = ellipse_df.iloc[ellipse_df.query('L_eye_frame == @frame_number').index[0]]
+
+        # Extract ellipse parameters
+        try:
+            center_x = int(current_frame_data['center_x'])
+            center_y = int(current_frame_data['center_y'])
+            width = int(current_frame_data['width'])
+            height = int(current_frame_data['height'])
+            phi = float(current_frame_data['phi'])
+
+            # Draw the ellipse on the frame
+            cv2.ellipse(frame, (center_x, center_y), (width, height), phi, 0, 360, (0, 255, 0), 2)
+        except ValueError:
+            print('could not paint ellipse, missing values')
+
+        # Display the frame
+        cv2.imshow("Original Frame", frame)
+
+        # Prompt user to select two points
+        print("Please select two points on the frame.")
+
+        # Callback function for mouse events
+        def mouse_callback(event, x, y, flags, param):
+            if event == cv2.EVENT_LBUTTONDOWN:
+                points.append((x, y))
+
+        # Set up the mouse callback
+        cv2.setMouseCallback("Original Frame", mouse_callback)
+
+        # Wait for the user to select two points
+        points = []
+        while len(points) < 2:
+            cv2.waitKey(1)
+
+        # Draw a line between the selected points
+        cv2.line(frame, points[0], points[1], (0, 255, 0), 2)
+        cv2.imshow("Line Drawn Frame", frame)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
+        # Calculate the rotation angle
+        angle = np.arctan2(points[1][1] - points[0][1], points[1][0] - points[0][0]) * 180 / np.pi
+
+        # Create rotation matrix
+        rotation_matrix = cv2.getRotationMatrix2D((frame.shape[1] // 2, frame.shape[0] // 2), angle, 1)
+        # rotation_matrix[:,2] = 0
+
+        # Generate and display video with 50 steps between original and rotated frames
+        for step in range(51):
+            alpha = step / 50.0
+            current_rotation_matrix = cv2.getRotationMatrix2D(
+                (frame.shape[1] // 2, frame.shape[0] // 2),
+                angle * alpha,
+                1
+            )
+            #   current_rotation_matrix[:,2] = 0
+            rotated_frame = cv2.warpAffine(frame, current_rotation_matrix, (frame.shape[1], frame.shape[0]))
+
+            cv2.imshow("Interpolated Rotated Frame", rotated_frame)
+
+            cv2.waitKey(100)  # Adjust the wait time to control the playback speed
+
+        # Release resources
+
+        cap.release()
+        cv2.destroyAllWindows()
+
+        return rotation_matrix, angle
+
+    def find_roundest_ellipse_frame(self, eye):
+
+        if eye == 'left':
+            df = self.le_df
+            frame_col = 'L_eye_frame'
+        elif eye == 'right':
+            df = self.re_df
+            frame_col = 'R_eye_frame'
+        else:
+            raise ValueError(f'eye can be only left/right - not {eye}')
+
+        s = df.width / df.height
+        closest_ind = np.argmin(np.abs(s - 1))  # find the index of the value closest to 1
+        roundest_frame_num = df[frame_col].iloc[closest_ind]
+        return roundest_frame_num
+
+    def find_rotation_matrix(self, eye, xflip=True):
+
+        roundest_ellipse_frame = self.find_roundest_ellipse_frame(eye)
+        if eye == 'left':
+            path_to_video = self.le_videos[0]
+            ellipse_df = self.le_df
+        elif eye == 'right':
+            path_to_video = self.re_videos[0]
+            ellipse_df = self.re_df
+        else:
+            raise ValueError(f'eye can be only left/right - not {eye}')
+
+        rotation_matrix, angle = self.rotate_frame_to_horizontal_with_interpolation(path_to_video_file=path_to_video,
+                                                                                    frame_number=roundest_ellipse_frame,
+                                                                                    ellipse_df=ellipse_df,
+                                                                                    xflip=xflip)
+
+        print(f'{eye} rotation matrix: \n {rotation_matrix} \n {eye} rotation angle: \n {angle}')
+        if eye == 'left':
+            self.left_rotation_matrix = rotation_matrix
+            self.left_rotation_angle = angle
+        elif eye == 'right':
+            self.right_rotation_matrix = rotation_matrix
+            self.right_rotation_angle = angle
+
+    @staticmethod
+    def apply_rotation_around_center_to_df(eye_df, transformation_matrix, rotation_angle):
+        """This is a static method for applying the transformation matrix to eye dataframes within a block class object"""
+        original_centers = eye_df[['center_x_corrected', 'center_y_corrected']].values
+        original_phi = eye_df['phi'].values
+        M = transformation_matrix
+        # apply the rotation to xy
+        rotated_centers = np.dot(original_centers, M[:, :2].T) + M[:, 2]
+        # apply rotation to phi
+        rotated_phi = np.rad2deg(original_phi) + rotation_angle
+
+        eye_df['center_x_rotated'] = rotated_centers[:, 0]
+        eye_df['center_y_rotated'] = rotated_centers[:, 1]
+        eye_df['phi_rotated'] = rotated_phi
+
+        return eye_df
+
+    def rotate_data_according_to_frame_ref(self, eye):
+        self.find_rotation_matrix(eye)
+        if eye == 'left':
+            self.le_df = self.apply_rotation_around_center_to_df(eye_df=self.le_df,
+                                                                 transformation_matrix=self.left_rotation_matrix,
+                                                                 rotation_angle=self.left_rotation_angle)
+        elif eye == 'right':
+            self.re_df = self.apply_rotation_around_center_to_df(eye_df=self.re_df,
+                                                                 transformation_matrix=self.right_rotation_matrix,
+                                                                 rotation_angle=self.right_rotation_angle)
+        print(f'{eye} data rotated')
+
+# you are here
+    def create_eye_data(self):
+        # create the eye_data dfs to finalize the translation and sort out some mess
+        self.right_eye_data = self.re_df.copy()
+        self.right_eye_data = self.right_eye_data[['Arena_TTL', 'R_eye_frame', 'ms_axis',
+                                                     'center_x_rotated', 'center_y_rotated',
+                                                     'phi_rotated', 'width', 'height']]
+        self.left_eye_data = self.le_df.copy()
+        self.left_eye_data = self.left_eye_data[['Arena_TTL', 'L_eye_frame', 'ms_axis',
+                                                   'center_x_rotated', 'center_y_rotated',
+                                                   'phi_rotated', 'width', 'height']]
+
+        # change dataframe column names to comply with earlier code
+        translation_dict = {'center_x_rotated': 'center_x',
+                            'center_y_rotated': 'center_y',
+                            'phi_rotated': 'phi',
+                            'L_eye_frame': 'eye_frame',
+                            'R_eye_frame': 'eye_frame',
+                            'Arena_TTL': 'OE_timestamp'}
+        for df in [self.right_eye_data, self.left_eye_data]:
+            print(df.columns)
+            df.rename(columns=translation_dict, inplace=True)
+            print(df.head())
+
+        print('successfully rotated the data reference horizon to tear-ducts, created left/right_eye_data')
+
     def block_eye_plot(self, export=False, ms_x_axis=True, plot_saccade_locs=False,
                        saccade_frames_l=None, saccade_frames_r=None):
         # normalize values:
@@ -1882,6 +2221,7 @@ class BlockSync:
             b_output.output_file(filename=str(self.analysis_path / f'pupillometry_block_{self.block_num}.html'),
                                  title=f'block {self.block_num} pupillometry')
         show(b_fig)
+
 
     def pupil_speed_calc(self):
 
@@ -2040,56 +2380,6 @@ class BlockSync:
         self.l_saccades_chunked = tight_dict['left_eye_saccades']
         self.r_saccades_chunked.to_csv(self.analysis_path / 'r_saccades.csv')
         self.l_saccades_chunked.to_csv(self.analysis_path / 'l_saccades.csv')
-
-    def calibrate_pixel_size(self, known_dist, overwrite=False):
-        """
-        This function takes in a known distance in mm and returns a calculation of the pixel size in each video
-        according to an ROI of given known distance in the L/R frames
-        :param block: BlockSync object of a trial with eye videos
-        :param known_dist: The distance to use for calibration measured in mm
-        :param overwrite: If True will run the method even if the output df already exists
-        :return: L and R values for pixel real-world size [in mm]
-        """
-        # first check if this calibration already exists for the block:
-        if not overwrite:
-            if (self.analysis_path / 'LR_pix_size.csv').exists():
-                internal_df = pd.read_csv(self.analysis_path / 'LR_pix_size.csv')
-                self.L_pix_size = internal_df.at[0, 'L_pix_size']
-                self.R_pix_size = internal_df.at[0, 'R_pix_size']
-                print("got the calibration values from the analysis folder")
-                return
-
-        # get the first frames of both eyes as reference images
-        # define the eye VideoCaptures
-        rcap = cv2.VideoCapture(self.re_videos[0])
-        lcap = cv2.VideoCapture(self.le_videos[0])
-
-        # get the second frames:
-        lcap.set(1, 1)
-        lret, lframe = lcap.read()
-        rcap.set(1, 1)
-        rret, rframe = rcap.read()
-        if rret and lret:
-            Rroi = cv2.selectROI(
-                "select the area of the known measurement through the diagonal of the ROI", rframe)
-            Lroi = cv2.selectROI(
-                "select the area of the known measurement through the diagonal of the ROI", lframe)
-        else:
-            print('some trouble with the video retrieval, check paths and try again')
-        R_dist = np.sqrt(Rroi[2] ** 2 + Rroi[3] ** 2)
-        L_dist = np.sqrt(Lroi[2] ** 2 + Lroi[3] ** 2)
-
-        self.L_pix_size = known_dist / L_dist
-        self.R_pix_size = known_dist / R_dist
-
-        cv2.destroyAllWindows()
-
-        # save these values to a dataframe for re-initializing the block:
-        internal_df = pd.DataFrame(columns=['L_pix_size','R_pix_size'])
-        internal_df.at[0, 'L_pix_size'] = self.L_pix_size
-        internal_df.at[0, 'R_pix_size'] = self.R_pix_size
-        internal_df.to_csv(self.analysis_path / 'LR_pix_size.csv', index=False)
-        print(f'exported to {self.analysis_path / "LR_pix_size.csv"}')
 
     def get_zeroth_sample_number(self):
         """

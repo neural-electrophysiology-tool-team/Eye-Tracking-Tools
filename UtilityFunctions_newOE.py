@@ -483,3 +483,44 @@ def data_cleanup(data, bad_indices, interpolate=False):
         data_cleaned[bad_mask] = np.interp(bad_indices, np.where(~bad_mask)[0], data_cleaned[~bad_mask])
 
     return data_cleaned
+
+
+def bokeh_plotter(data_list, label_list,
+                  plot_name='default',
+                  x_axis='X', y_axis='Y',
+                  peaks=None, export_path=False):
+    """Generates an interactive Bokeh plot for the given data vector.
+    Args:
+        data_list (list or array): The data to be plotted.
+        label_list (list of str): The labels of the data vectors
+        plot_name (str, optional): The title of the plot. Defaults to 'default'.
+        x_axis (str, optional): The label for the x-axis. Defaults to 'X'.
+        y_axis (str, optional): The label for the y-axis. Defaults to 'Y'.
+        peaks (list or array, optional): Indices of peaks to highlight on the plot. Defaults to None.
+        export_path (False or str): when set to str, will output the resulting html fig
+    """
+    color_cycle = cycle(bokeh.palettes.Category10_10)
+    fig = bokeh.plotting.figure(title=f'bokeh explorer: {plot_name}',
+                                x_axis_label=x_axis,
+                                y_axis_label=y_axis,
+                                plot_width=1500,
+                                plot_height=700)
+
+    for i, vec in enumerate(range(len(data_list))):
+        color = next(color_cycle)
+        data_vector = data_list[vec]
+        if label_list is None:
+            fig.line(range(len(data_vector)), data_vector, line_color=color, legend_label=f"Line {len(fig.renderers)}")
+        elif len(label_list) == len(data_list):
+            fig.line(range(len(data_vector)), data_vector, line_color=color, legend_label=f"{label_list[i]}")
+
+    if peaks is not None:
+        fig.circle(peaks, data_vector[peaks], size=10, color='red')
+
+    if export_path is not False:
+        print(f'exporting to {export_path}')
+        bokeh.io.output.output_file(filename=str(export_path / f'{plot_name}.html'), title=f'{plot_name}')
+    bokeh.plotting.show(fig)
+
+    # verification function for a single eye video + ellipse (requires cv2)
+
