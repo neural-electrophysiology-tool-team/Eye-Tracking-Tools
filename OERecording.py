@@ -351,7 +351,8 @@ class OERecording:
         else:
             return data_matrix
 
-    def get_accel_data(self, channels, start_time_ms, window_ms, convert_to_mv=True, return_timestamps=True):
+    def get_accel_data(self, channels, start_time_ms, window_ms, convert_to_mv=True, return_timestamps=True,
+                       direct_paths_to_files=None):
         """
         This is a translated matlab function that efficiently retrieves data from Open-Ephys format neural recordings
         :param self: an OERecording class obj. with a metadata file created by the matlab class with the same name
@@ -424,7 +425,10 @@ class OERecording:
         for i in range(n_ch):  # iterate over channels
             data = np.zeros(p_rec_idx.shape, dtype=np.dtype('>i2'))  # Initialize the data array for a specific channel
             curr_rec = 0  # for this channel, initialize the record counter
-            c_file = self.oe_file_path / self.accel_files[channels[i] - 1]  # get path of current channel file
+            if direct_paths_to_files is None:
+                c_file = self.oe_file_path / self.accel_files[channels[i] - 1]  # get path of current channel file
+            else:
+                c_file = self.oe_file_path / direct_paths_to_files[i] # get the direct path of current channel file
             with open(c_file, 'rb') as fid:  # open the file such that it will close when left alone
                 for j in range(n_windows):  # Iterate over sampling windows
                     # use seek to go to the appropriate position in the file

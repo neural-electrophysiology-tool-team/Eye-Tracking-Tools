@@ -528,8 +528,7 @@ class BlockSync:
             with open(export_path, 'wb') as file:
                 pickle.dump(frame_val_dict, file)
 
-    @staticmethod
-    def oe_events_parser(open_ephys_csv_path, channel_names, arena_channel_name='Arena_TTL', export_path=None,
+    def oe_events_parser(self, open_ephys_csv_path, channel_names, arena_channel_name='Arena_TTL', export_path=None,
                          auto_break_selection=False):
         """
 
@@ -561,30 +560,36 @@ class BlockSync:
                 # If this is the arena channel we need to collect the first and last frames which correspond with
                 # the video itsef (as TTLs are always being transmitted and a pause is expected before the video starts
                 if sname == arena_channel_name:
-                    diff_series = np.diff(s)
-                    diff_mode = stats.mode(diff_series)[0][0]
-                    arena_start_stop = np.where(diff_series > 10 * diff_mode)[0]
-                    if len(arena_start_stop) != 2:
+                    diff_arr = np.diff(s.values) / (self.sample_rate / 1000)  # milliseconds convention
+                    arena_start_stop = np.where(diff_arr > 1000)[0]
+                    option_count = len(arena_start_stop)
+                    if option_count > 2:
                         if auto_break_selection is not False:
-                            start_ind = arena_start_stop[0]
-                            end_ind = arena_start_stop[1]
+                            # max_diff logic:
+                            ind_max_diff = np.argmax(np.diff(arena_start_stop))
+                            start_ind = arena_start_stop[ind_max_diff]
+                            end_ind = arena_start_stop[ind_max_diff + 1]
                         else:
-                            start_ind = input(f'there is some kind of problem because '
+                            start_choice_ind = input(f'there is some kind of problem because '
                                               f'there should be 2 breaks in the arena TTLs'
                                               f'and there are {len(arena_start_stop)}, those indices are: '
                                               f'{[s.iloc[i] for i in arena_start_stop]}... '
                                               f'choose the index to use as startpoint:')
-                            end_ind = input('choose the index to use as endpoint:')
-                        arena_start_timestamp = s.iloc[arena_start_stop[int(start_ind)] + 1]
+                            end_choice_ind = input('choose the index to use as endpoint:')
+                            start_ind = arena_start_stop[start_choice_ind]
+                            end_ind = arena_start_stop[end_choice_ind]
+                        arena_start_timestamp = s.iloc[int(start_ind) + 1]
                         print(f'arena first frame timestamp: {arena_start_timestamp}')
-                        arena_end_timestamp = s.iloc[arena_start_stop[int(end_ind)]]
+                        arena_end_timestamp = s.iloc[int(end_ind)]
                         print(f'arena end frame timestamp: {arena_end_timestamp}')
-                    else:
+                    elif option_count == 2:
                         print(f'the arena TTLs are signaling start and stop positions at {arena_start_stop}')
                         arena_start_timestamp = s.iloc[arena_start_stop[0] + 1]
                         print(f'arena first frame timestamp: {arena_start_timestamp}')
                         arena_end_timestamp = s.iloc[arena_start_stop[1]]
                         print(f'arena end frame timestamp: {arena_end_timestamp}')
+                    elif option_count < 2:
+                        arena_start_stop
                 else:
                     print(f'{sname} was not identified as {arena_channel_name}')
                 # create a counter for every rising edge - these should match video frames
@@ -608,7 +613,10 @@ class BlockSync:
 
         return open_ephys_events, arena_start_timestamp, arena_end_timestamp
 
-    def parse_open_ephys_events(self, align_to_zero=True, auto_break_selection=False, arena_channel_name='Arena_TTL'):
+    def parse_open_ephys_events(self, align_to_zero=True,
+                                auto_break_selection=True,
+                                arena_channel_name='Arena_TTL',
+                                overwrite=False):
         """
         Gets the sample rate from the settings.xml file
         Creates the parsed_events.csv file
@@ -617,7 +625,7 @@ class BlockSync:
         """
 
         print('running parse_open_ephys_events...')
-        if (self.oe_path.parent / 'parsed_events.csv').is_file():
+        if overwrite is False and (self.oe_path.parent / 'parsed_events.csv').is_file():
             print(f'block {self.block_num} has a parsed events file, reading...')
             self.oe_events = pd.read_csv(str((self.oe_path.parent / 'parsed_events.csv')), index_col=0)
             self.arena_vid_first_t = \
@@ -630,7 +638,7 @@ class BlockSync:
             # First, create the events.csv file:
             self.oe_events_to_csv(align_to_zero=align_to_zero)
 
-            # Now work on the parsed_events file and expoert it
+            # Now work on the parsed_events file and export it
             ex_path = self.block_path / rf'oe_files' / self.exp_date_time / 'parsed_events.csv'
             self.oe_events, self.arena_vid_first_t, self.arena_vid_last_t = self.oe_events_parser(
                 self.block_path / rf'oe_files' / self.exp_date_time / 'events.csv',
@@ -641,11 +649,6 @@ class BlockSync:
         self.l_vid_last_t = self.oe_events['R_eye_TTL'].loc[self.oe_events['R_eye_TTL_frame'].idxmax()]
         self.r_vid_first_t = self.oe_events['L_eye_TTL'].loc[self.oe_events['L_eye_TTL_frame'].idxmin()]
         self.r_vid_last_t = self.oe_events['L_eye_TTL'].loc[self.oe_events['L_eye_TTL_frame'].idxmax()]
-
-    # def get_first_last_frame_times(self, frame_col):
-    #     s = ~pd.isna(self.oe_events[frame_col])
-    #     df_loc = s[s == True].index[-1]
-    #     self.oe_events['L_eye_TTL'].loc[df_loc]
 
     @staticmethod
     def get_closest_frame(timestamp, vid_timeseries, report_acc=None):
@@ -1407,28 +1410,45 @@ class BlockSync:
         return result
 
     @staticmethod
-    def bokeh_plotter(data_vector,
+    def bokeh_plotter(data_list, label_list,
                       plot_name='default',
-                      x_axis='X',
-                      y_axis='Y',
-                      peaks=None):
+                      x_axis='X', y_axis='Y',
+                      peaks=None, peaks_list=False, export_path=False):
         """Generates an interactive Bokeh plot for the given data vector.
         Args:
-            data_vector (list or array): The data to be plotted.
+            data_list (list or array): The data to be plotted.
+            label_list (list of str): The labels of the data vectors
             plot_name (str, optional): The title of the plot. Defaults to 'default'.
             x_axis (str, optional): The label for the x-axis. Defaults to 'X'.
             y_axis (str, optional): The label for the y-axis. Defaults to 'Y'.
             peaks (list or array, optional): Indices of peaks to highlight on the plot. Defaults to None.
+            export_path (False or str): when set to str, will output the resulting html fig
         """
-        fig = figure(title=f'bokeh explorer: {plot_name}',
-                     x_axis_label=x_axis,
-                     y_axis_label=y_axis,
-                     plot_width=1500,
-                     plot_height=700)
-        fig.line(range(len(data_vector)), data_vector)
-        if peaks is not None:
+        color_cycle = cycle(bokeh.palettes.Category10_10)
+        fig = bokeh.plotting.figure(title=f'bokeh explorer: {plot_name}',
+                                    x_axis_label=x_axis,
+                                    y_axis_label=y_axis,
+                                    plot_width=1500,
+                                    plot_height=700)
+
+        for i, vec in enumerate(range(len(data_list))):
+            color = next(color_cycle)
+            data_vector = data_list[vec]
+            if label_list is None:
+                fig.line(range(len(data_vector)), data_vector, line_color=color,
+                         legend_label=f"Line {len(fig.renderers)}")
+            elif len(label_list) == len(data_list):
+                fig.line(range(len(data_vector)), data_vector, line_color=color, legend_label=f"{label_list[i]}")
+            if peaks is not None and peaks_list is True:
+                fig.circle(peaks[i], data_vector[peaks[i]], size=10, color=color)
+
+        if peaks is not None and peaks_list is False:
             fig.circle(peaks, data_vector[peaks], size=10, color='red')
-        show(fig)
+
+        if export_path is not False:
+            print(f'exporting to {export_path}')
+            bokeh.io.output.output_file(filename=str(export_path / f'{plot_name}.html'), title=f'{plot_name}')
+        bokeh.plotting.show(fig)
 
     def collect_lights_out_events(self, data, roll_w_size=1500, plot=False, plot_title='peak detector output'):
         """Identifies potential lights-out events from the given data.
@@ -1887,8 +1907,11 @@ class BlockSync:
             df = pd.DataFrame.from_dict(self.le_jitter_dict)
         elif eye == 'right':
             df = pd.DataFrame.from_dict(self.re_jitter_dict)
-
-        self.bokeh_plotter([df.top_correlation_dist], ['drift_distance'], peaks=video_indices)
+        print(video_indices)
+        if len(video_indices) < 1:
+            self.bokeh_plotter([df.top_correlation_dist], ['drift_distance'], peaks=video_indices)
+        else:
+            print('no indices were found to remove')
         print('If these parameters produce good results, run the "remove_large_jitter" function with them')
 
     def remove_large_jitter(self, eye, max_distance, diff_threshold, gap_to_bridge=6):
@@ -2156,7 +2179,281 @@ class BlockSync:
                                                                  rotation_angle=self.right_rotation_angle)
         print(f'{eye} data rotated')
 
-# you are here
+    @staticmethod
+    def duplicate_df_row_at_index(df, ind_to_duplicate, correct_ms=True, correct_oe_timestamps=True):
+        """
+        :param correct_ms: if true, will correct the ms_axis of eye data
+        :param df: dataframe
+        :param ind_to_duplicate: which row to duplicate, in iloc logic
+        :return: longer df
+        """
+        # cut the df
+        df_top = df.iloc[:ind_to_duplicate]
+        df_bot = df.iloc[ind_to_duplicate:]
+        # duplicate the row
+        df_top = df_top.append(df_top.iloc[-1])
+        df_longer = pd.concat([df_top, df_bot], ignore_index=False)
+        if correct_ms:
+            df_longer['ms_axis'].iloc[ind_to_duplicate:-1] = df_longer['ms_axis'].iloc[ind_to_duplicate + 1:].values
+        if correct_oe_timestamps:
+            df_longer['OE_timestamp'].iloc[ind_to_duplicate:-1] = df_longer['OE_timestamp'].iloc[
+                                                                  ind_to_duplicate + 1:].values
+        return df_longer.copy()
+
+    @staticmethod
+    def remove_df_row_at_index(df, ind_to_remove, correct_ms=True, correct_oe_timestamps=True):
+        label_to_remove = df.index[ind_to_remove]
+        original_ms_axis = df['ms_axis'].iloc[ind_to_remove:].values
+        original_oe_axis = df['OE_timestamp'].iloc[ind_to_remove:].values
+        df = df.drop(label_to_remove)
+        if correct_ms:
+            df['ms_axis'].iloc[ind_to_remove:] = original_ms_axis[:-1]
+        if correct_oe_timestamps:
+            df['OE_timestamp'].iloc[ind_to_remove:] = original_oe_axis[:-1]
+        return df
+
+    def correct_relative_eye_drift_based_on_LED_lights_out(self, verification_plots=True):
+        """
+        Corrects the relative eye drift based on LED lights going out.
+
+        Parameters:
+            verification_plots (bool): If True, verification plots are generated to visualize the detection.
+
+        Returns:
+            tuple: A tuple containing two pandas DataFrame objects, representing the corrected left and right eye data.
+        """
+        r_vals = self.re_frame_val_list[0][1]
+        l_vals = self.le_frame_val_list[0][1]
+        l_blinks = self.led_blink_frames_l
+        r_blinks = self.led_blink_frames_r
+        chunks_r = np.insert(np.diff(r_blinks) > 10, 0, False)
+        r_inds = np.insert(r_blinks[chunks_r], 0, r_blinks[0])
+        chunks_l = np.insert(np.diff(l_blinks) > 10, 0, False)
+        l_inds = np.insert(l_blinks[chunks_l], 0, l_blinks[0])
+        # check for non-matchig lengths
+        if len(l_inds) > len(r_inds):
+            if max(l_inds) > max(r_inds) + 100:  # left with an extra led at the end
+                l_inds = l_inds[:len(r_inds)]
+            elif min(l_inds) < min(r_inds) - 100:  # left with extra led at the beginning
+                l_inds = l_inds[1:]
+        elif len(r_inds) > len(l_inds):
+            if max(r_inds) > max(l_inds) + 100:
+                r_inds = r_inds[:len(l_inds)]
+            elif min(r_inds) < min(l_inds) - 100:
+                r_inds = r_inds[1:]
+
+        if verification_plots:
+            # verify detection here:
+            z_score_data_r = self.rolling_window_z_scores(r_vals, roll_w_size=1500)
+            z_score_data_l = self.rolling_window_z_scores(l_vals, roll_w_size=1500)
+
+            self.bokeh_plotter([z_score_data_r, z_score_data_l],
+                               label_list=['r_scores', 'l_scores'],
+                               x_axis='Frame',
+                               y_axis='brightness Z score',
+                               peaks=[r_inds, l_inds], peaks_list=True)
+        # I want to understand the drift between the two corrected l_ms vectors now -
+        # if a frame appears in two l_ms values, take the larger one (a duplicated frame)
+        l_frames = []
+        r_frames = []
+        l_ms = []
+        r_ms = []
+        l_blink_inds = []
+        r_blink_inds = []
+        # collect the l_ms list
+        for i, (lb, rb) in enumerate(zip(l_inds, r_inds)):
+            l_blink_row = self.left_eye_data.query('eye_frame == @lb')
+            r_blink_row = self.right_eye_data.query('eye_frame == @rb')
+            # check that both rows exist in the eye dataframes
+            if r_blink_row.empty or l_blink_row.empty:
+                print('missing frame at', i)
+                continue
+            l_blink_row = l_blink_row.iloc[-1][['eye_frame', 'ms_axis']]
+            l_ms.append(l_blink_row['ms_axis'])
+            l_frames.append(l_blink_row['eye_frame'])
+            l_blink_inds.append(l_blink_row.name)
+            r_blink_row = r_blink_row.iloc[-1][['eye_frame', 'ms_axis']]
+            r_ms.append(r_blink_row['ms_axis'])
+            r_frames.append(r_blink_row['eye_frame'])
+            r_blink_inds.append(r_blink_row.name)
+
+        # This bit creates a map of the necessary movements to each dataframe so that the sync will match
+        # (for each blink)
+        r_arr = np.array([r_frames, r_ms]).T
+        l_arr = np.array([l_frames, l_ms]).T
+        diff_arr = r_arr[:, 1] - l_arr[:, 1]
+        diff_arr = (diff_arr // 17).astype(int)
+        correction_order = []
+        l_corrections_inds = []
+        l_corrections_size = []
+        r_corrections_inds = []
+        r_corrections_size = []
+        stable_ind_pairs = []
+        for i, diff in enumerate(diff_arr):
+            if diff > 0:  # L lagging
+                l_corrections_inds.append(l_blink_inds[i])
+                l_corrections_size.append(diff)
+                correction_order.append('L')
+            elif diff < 0:  # R lagging
+                r_corrections_inds.append(r_blink_inds[i])
+                r_corrections_size.append(np.abs(diff))
+                correction_order.append('R')
+            else:
+                stable_ind_pairs.append([r_blink_inds[i], l_blink_inds[i]])
+                correction_order.append('S')
+        r_corrections = np.array([r_corrections_inds, r_corrections_size]).T
+        l_corrections = np.array([l_corrections_inds, l_corrections_size]).T
+
+        # This is the second try:
+        l_df = self.left_eye_data.copy()
+        r_df = self.right_eye_data.copy()
+        print(len(l_df), len(r_df))
+        current_l_correction = 0
+        current_r_correction = 0
+        print(len(r_corrections))
+        print(len(l_corrections))
+        # Initialize lists to track inserted rows
+        inserted_rows_l = []
+        removed_rows_l = []
+        inserted_rows_r = []
+        removed_rows_r = []
+        for minute, df_to_correct in enumerate(correction_order):
+            print(minute, df_to_correct)
+            if df_to_correct == 'L':
+                l_corr = l_corrections[current_l_correction]
+                inserted_rows_l.append(l_corr)
+                print(l_corr)
+                for row in range(l_corr[1]):
+                    l_df = self.duplicate_df_row_at_index(l_df, l_corr[0], correct_ms=True,
+                                                          correct_oe_timestamps=True)
+                    inserted_rows_l.append(l_corr[0])
+                    try:
+                        l_df = self.remove_df_row_at_index(l_df, l_corr[0] + 3534, correct_ms=True,
+                                                           correct_oe_timestamps=True)
+                    except IndexError or ValueError:
+                        l_df = self.remove_df_row_at_index(l_df, l_df.index[-1])
+                current_l_correction += 1
+            elif df_to_correct == 'R':
+                r_corr = r_corrections[current_r_correction]
+                inserted_rows_r.append(r_corr)
+                # print(r_corr)
+                for row in range(r_corr[1]):
+
+                    r_df = self.duplicate_df_row_at_index(r_df, r_corr[0], correct_ms=True)
+                    try:
+                        r_df = self.remove_df_row_at_index(r_df, r_corr[0] + 3534, correct_ms=True)
+                    except IndexError or ValueError:
+                        r_df = self.remove_df_row_at_index(r_df, r_df.index[-1], correct_ms=True)
+                current_r_correction += 1
+            else:
+                continue
+
+        return l_df.copy(), r_df.copy()
+
+    @staticmethod
+    def get_timestamp_diff(suspect_times, real_times):
+        real_ts = []
+        for i, t in enumerate(suspect_times):
+            real_t = real_times[np.argmin(np.abs(real_times - t))]
+            real_ts.append(real_t)
+        return np.array([suspect_times, real_ts, suspect_times - real_ts]).T
+
+    def correct_eye_sync_based_on_OE_LED_events(self):
+        # get the brightness values of the frames for each eye
+        r_vals = self.re_frame_val_list[0][1]
+        l_vals = self.le_frame_val_list[0][1]
+
+        # get the blink frames
+        l_blinks = self.led_blink_frames_l
+        r_blinks = self.led_blink_frames_r
+
+        # find the beginning sample of the blink frames:
+        chunks_r = np.insert(np.diff(r_blinks) > 10, 0, False)
+        r_inds = np.insert(r_blinks[chunks_r], 0, r_blinks[0])
+        chunks_l = np.insert(np.diff(l_blinks) > 10, 0, False)
+        l_inds = np.insert(l_blinks[chunks_l], 0, l_blinks[0])
+
+        # check for non-matchig lengths
+        if len(l_inds) > len(r_inds):
+            if max(l_inds) > max(r_inds) + 100:  # left with an extra led at the end
+                print('hi')
+                l_inds = l_inds[:len(r_inds)]
+            elif min(l_inds) < min(r_inds) - 100:  # left with extra led at the beginning
+                l_inds = l_inds[1:]
+                print('hello')
+        elif len(r_inds) > len(l_inds):
+            if max(r_inds) > max(l_inds) + 100:
+                print('hell')
+                r_inds = r_inds[:len(l_inds)]
+            elif min(r_inds) < min(l_inds) - 100:
+                r_inds = r_inds[1:]
+                print('helloya')
+
+        l_df = self.left_eye_data.copy()
+        r_df = self.right_eye_data.copy()
+        l_frames = []
+        r_frames = []
+        l_ms = []
+        r_ms = []
+        l_blink_inds = []
+        r_blink_inds = []
+
+        for i, (lb, rb) in enumerate(zip(l_inds, r_inds)):
+            l_blink_row = self.left_eye_data.query('eye_frame == @lb')
+            r_blink_row = self.right_eye_data.query('eye_frame == @rb')
+            # check that both rows exist in the eye dataframes
+            if r_blink_row.empty or l_blink_row.empty:
+                print('missing frame at', i)
+                continue
+            if len(r_blink_row) > 1 or len(l_blink_row) > 1:
+                print('double row at', i)
+            l_blink_row = l_blink_row.iloc[-1][['eye_frame', 'ms_axis']]
+            l_ms.append(l_blink_row['ms_axis'])
+            l_frames.append(l_blink_row['eye_frame'])
+            l_blink_inds.append(l_blink_row.name)
+            r_blink_row = r_blink_row.iloc[-1][['eye_frame', 'ms_axis']]
+            r_ms.append(r_blink_row['ms_axis'])
+            r_frames.append(r_blink_row['eye_frame'])
+            r_blink_inds.append(r_blink_row.name)
+        r_arr = np.array([r_frames, r_ms]).T
+        l_arr = np.array([l_frames, l_ms]).T
+        # This is where the led blink frames are found and a mean correction value is computed
+        # get ms oe-based blink frames:
+        oe_led_blinks = self.oe_events[['LED_driver']].query('LED_driver == LED_driver').values
+        ms_timestamps = oe_led_blinks.T / 20
+        ms_axis = self.left_eye_data.ms_axis.values
+        ms_blink_frames = []
+        # The timestamps now correspond with the real time axis and not the down-sampled arena frames time markers -
+        # the following code corrects that and finds the closest frames
+        for t in ms_timestamps[0]:
+            ms_blink_frames.append(ms_axis[np.argmin(np.abs(ms_axis - t))])
+
+        ms_blink_times = np.array(ms_blink_frames)
+
+        l_timestamp_diff = self.get_timestamp_diff(l_arr[:, 1], ms_blink_times)
+        r_timestamp_diff = self.get_timestamp_diff(r_arr[:, 1], ms_blink_times)
+
+        # this computes how many 'frame steps' the dataframe needs to take to be synced
+        oe_led_blink_correction = np.mean(l_timestamp_diff[1:-1, 2]) // 17
+
+        # if the correction is positive -> the report is lagging behind real events and needs to move back in time
+        # if negative -> the report is produced before actual frames are taken and needs to be pushed forward to sync
+
+        # oe_lag correction - RUN ONLY ONCE!!!!
+        df = self.left_eye_data.copy()
+        df['OE_timestamp'] = df['OE_timestamp'] - oe_led_blink_correction * 17 * 20
+        df['ms_axis'] = df['ms_axis'] - oe_led_blink_correction * 17
+        oe_synced_left_eye_data = df  # this df should be corrected to OE events!
+
+        df = self.right_eye_data.copy()
+        df['OE_timestamp'] = df['OE_timestamp'] - oe_led_blink_correction * 17 * 20
+        df['ms_axis'] = df['ms_axis'] - oe_led_blink_correction * 17
+        oe_synced_right_eye_data = df  # this df should be corrected to OE events!
+        print(f'The correction employed was {oe_led_blink_correction}, \n'
+              f'check the output and overwirte the left/right eye data dfs when happy, then re-export')
+        return oe_synced_left_eye_data, oe_synced_right_eye_data
+
+    # you are here
     def create_eye_data(self):
         # create the eye_data dfs to finalize the translation and sort out some mess
         self.right_eye_data = self.re_df.copy()
