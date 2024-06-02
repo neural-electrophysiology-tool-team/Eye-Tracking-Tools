@@ -251,6 +251,8 @@ class BlockSync:
         self.left_rotation_angle = None
         self.right_rotation_matrix = None
         self.right_rotation_angle = None
+        self.right_eye_data = None
+        self.left_eye_data = None
 
     def __str__(self):
         return str(f'{self.animal_call}, block {self.block_num}, on {self.exp_date_time}')
@@ -770,9 +772,10 @@ class BlockSync:
             ret, frame = cap.read()
             if not ret:
                 break
-            grey = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            grey[grey < threshold_value] = 0
-            mean_values.append(np.mean(grey))
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            gray[gray < threshold_value] = 0
+            mean_brightness = cv2.mean(gray)[0]
+            mean_values.append(mean_brightness)
             indexes.append(i)
             i += 1
         cap.release()
@@ -1086,7 +1089,7 @@ class BlockSync:
         only export when this step gives a synchronized plot
         """
         if ms_axis:
-            x_axis = self.manual_sync_df['Arena_TTL'] / 20
+            x_axis = self.manual_sync_df['Arena_TTL'] / (self.sample_rate / 1000)
             x_axis_label = 'Milliseconds'
         else:
             x_axis = self.manual_sync_df.index
@@ -1264,12 +1267,14 @@ class BlockSync:
         print(f'\n ellipses calculation complete')
         return ellipse_df
 
-    def read_dlc_data(self, threshold_to_use=0.999, export=True):
+    def read_dlc_data(self, threshold_to_use=0.95, export=True, overwrite=False):
         """
         Method to read and analyze the dlc files and fit ellipses to create the le/re ellipses attributes of the block
         """
         # if the dataframes already exist, read them
-        if (self.analysis_path / 're_df.csv').exists() and (self.analysis_path / 'le_df.csv').exists():
+        if ((self.analysis_path / 're_df.csv').exists()
+                and (self.analysis_path / 'le_df.csv').exists()
+                and overwrite is False):
             self.re_df = pd.read_csv(self.analysis_path / 're_df.csv', index_col=0).reset_index()
             if 'Unnamed: 0' in self.re_df.columns:
                 self.re_df = self.re_df.drop(axis=1, labels='Unnamed: 0')
@@ -1277,8 +1282,8 @@ class BlockSync:
             if 'Unnamed: 0' in self.le_df.columns:
                 self.le_df = self.le_df.drop(axis=1, labels='Unnamed: 0')
             # append ms_axis to df
-            self.re_df['ms_axis'] = self.re_df['Arena_TTL'] / 20
-            self.le_df['ms_axis'] = self.le_df['Arena_TTL'] / 20
+            self.re_df['ms_axis'] = self.re_df['Arena_TTL'] / (self.sample_rate / 1000)
+            self.le_df['ms_axis'] = self.le_df['Arena_TTL'] / (self.sample_rate / 1000)
             print('eye dataframes loaded from analysis folder')
             return
 
@@ -1303,14 +1308,16 @@ class BlockSync:
         self.re_ellipses = self.eye_tracking_analysis(self.re_csv, threshold_to_use)
 
         # get the frame-timestamp relationship for each video
-        self.le_df = self.final_sync_df.drop(labels=['Arena_frame', 'R_eye_frame'], axis=1)
-        self.re_df = self.final_sync_df.drop(labels=['Arena_frame', 'L_eye_frame'], axis=1)
-
+        try:
+            self.le_df = self.final_sync_df.drop(labels=['Arena_frame', 'R_eye_frame'], axis=1)
+            self.re_df = self.final_sync_df.drop(labels=['Arena_frame', 'L_eye_frame'], axis=1)
+        except AttributeError:
+            print('')
         # use frame numbers as the hooks to merge data and frame-timestamp relationships
         self.le_df = self.le_df.merge(self.le_ellipses, left_on='L_eye_frame', right_index=True, how='left')
         self.re_df = self.re_df.merge(self.re_ellipses, left_on='R_eye_frame', right_index=True, how='left')
-        self.re_df['ms_axis'] = self.re_df['Arena_TTL'] / 20
-        self.le_df['ms_axis'] = self.le_df['Arena_TTL'] / 20
+        self.re_df['ms_axis'] = self.re_df['Arena_TTL'] / (self.sample_rate / 1000)
+        self.le_df['ms_axis'] = self.le_df['Arena_TTL'] / (self.sample_rate / 1000)
         print('created le / re dataframes')
 
         if export:
@@ -1478,7 +1485,7 @@ class BlockSync:
                                              peak_indices + 2]).flatten())
 
         if plot:
-            self.bokeh_plotter(z_score_data,
+            self.bokeh_plotter([z_score_data],['z_score'],
                                plot_name=plot_title,
                                x_axis='Frame',
                                y_axis='brightness Z score',
@@ -1737,7 +1744,7 @@ class BlockSync:
                 pickle.dump(jitter_report_dict, file)
             print(f'results saved to {export_path}')
 
-        print('Jitter report computed - check out re/le_jitter_dict attributes')
+        print('Got the jitter report - check out re/le_jitter_dict attributes')
 
     @staticmethod
     def plot_jitter_vectors(jitter_dict,
@@ -1993,7 +2000,7 @@ class BlockSync:
 
         return
 
-    # This is where the dataframe rotation functions are:
+    # dataframe rotation functions:
 
     @staticmethod
     def rotate_frame_to_horizontal_with_interpolation(path_to_video_file, frame_number, ellipse_df, xflip=True,
@@ -2110,7 +2117,7 @@ class BlockSync:
         return rotation_matrix, angle
 
     def find_roundest_ellipse_frame(self, eye):
-
+        # This is an old function - used as part of the
         if eye == 'left':
             df = self.le_df
             frame_col = 'L_eye_frame'
@@ -2152,7 +2159,8 @@ class BlockSync:
 
     @staticmethod
     def apply_rotation_around_center_to_df(eye_df, transformation_matrix, rotation_angle):
-        """This is a static method for applying the transformation matrix to eye dataframes within a block class object"""
+        """This is a static method for applying the transformation matrix
+        to eye dataframes within a block class object"""
         original_centers = eye_df[['center_x_corrected', 'center_y_corrected']].values
         original_phi = eye_df['phi'].values
         M = transformation_matrix
@@ -2178,6 +2186,50 @@ class BlockSync:
                                                                  transformation_matrix=self.right_rotation_matrix,
                                                                  rotation_angle=self.right_rotation_angle)
         print(f'{eye} data rotated')
+
+    def get_rotated_frame(self, frame_number, eye, xflip=True):
+        """
+        This is a method to get a rotated version of the frame for plotting and verification purposes
+        :param frame_number:
+        :param eye:
+        :return:
+        """
+        if eye == 'left':
+            path_to_video = self.le_videos[0]
+            rotation_matrix = self.left_rotation_matrix
+        elif eye == 'right':
+            path_to_video = self.re_videos[0]
+            rotation_matrix = self.right_rotation_matrix
+        else:
+            print('eye can only be left or right')
+            return
+
+        # Read the video file
+        cap = cv2.VideoCapture(path_to_video)
+
+        # Check if the video file is opened successfully
+        if not cap.isOpened():
+            print("Error: Unable to open video file.")
+            return None
+
+        # Set the frame position
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+
+        # Read the frame
+        ret, frame = cap.read()
+
+        # Check if the frame is read successfully
+        if not ret:
+            print(f"Error: Unable to read frame {frame_number}.")
+            cap.release()
+            return None
+
+        # horizontally flip frame if applicable:
+        if xflip:
+            frame = cv2.flip(frame, 1)
+
+        rotated_frame = cv2.warpAffine(frame, rotation_matrix, (frame.shape[1], frame.shape[0]))
+        return rotated_frame
 
     @staticmethod
     def duplicate_df_row_at_index(df, ind_to_duplicate, correct_ms=True, correct_oe_timestamps=True):
@@ -2453,18 +2505,29 @@ class BlockSync:
               f'check the output and overwirte the left/right eye data dfs when happy, then re-export')
         return oe_synced_left_eye_data, oe_synced_right_eye_data
 
-    # you are here
+    @staticmethod
+    def get_maj_min_axes(df):
+        # Calculate major and minor axes using vectorized operations
+        df['major_ax'] = np.nanmax(df[['width', 'height']], axis=1)
+        df['minor_ax'] = np.nanmin(df[['width', 'height']], axis=1)
+
+        # Define the axes ratio of the ellipse as major/minor
+        df['ratio'] = df['major_ax'] / df['minor_ax']
+
+        return df
+
     def create_eye_data(self):
         # create the eye_data dfs to finalize the translation and sort out some mess
         self.right_eye_data = self.re_df.copy()
         self.right_eye_data = self.right_eye_data[['Arena_TTL', 'R_eye_frame', 'ms_axis',
                                                      'center_x_rotated', 'center_y_rotated',
                                                      'phi_rotated', 'width', 'height']]
+        self.right_eye_data = self.get_maj_min_axes(self.right_eye_data)
         self.left_eye_data = self.le_df.copy()
         self.left_eye_data = self.left_eye_data[['Arena_TTL', 'L_eye_frame', 'ms_axis',
                                                    'center_x_rotated', 'center_y_rotated',
                                                    'phi_rotated', 'width', 'height']]
-
+        self.left_eye_data = self.get_maj_min_axes(self.left_eye_data)
         # change dataframe column names to comply with earlier code
         translation_dict = {'center_x_rotated': 'center_x',
                             'center_y_rotated': 'center_y',
@@ -2478,6 +2541,88 @@ class BlockSync:
             print(df.head())
 
         print('successfully rotated the data reference horizon to tear-ducts, created left/right_eye_data')
+
+    def get_rotated_frame(self, frame_number, eye, xflip=True):
+        """
+        This is a method to get a rotated version of the frame for plotting and verification purpuses
+        :param frame_number:
+        :param eye:
+        :return:
+        """
+        if eye == 'left':
+            path_to_video = self.le_videos[0]
+            rotation_matrix = self.left_rotation_matrix
+        elif eye == 'right':
+            path_to_video = self.re_videos[0]
+            rotation_matrix = self.right_rotation_matrix
+        else:
+            print('eye can only be left or right')
+            return
+
+        # Read the video file
+        cap = cv2.VideoCapture(path_to_video)
+
+        # Check if the video file is opened successfully
+        if not cap.isOpened():
+            print("Error: Unable to open video file.")
+            return None
+
+        # Set the frame position
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+
+        # Read the frame
+        ret, frame = cap.read()
+
+        # Check if the frame is read successfully
+        if not ret:
+            print(f"Error: Unable to read frame {frame_number}.")
+            cap.release()
+            return None
+
+        # horizontally flip frame if applicable:
+        if xflip:
+            frame = cv2.flip(frame, 1)
+
+        rotated_frame = cv2.warpAffine(frame, rotation_matrix, (frame.shape[1], frame.shape[0]))
+        return rotated_frame
+
+    # you are here
+    def get_best_reference(self, eye):
+        if eye == 'left':
+            df = self.left_eye_data
+        elif eye == 'right':
+            df = self.right_eye_data
+        else:
+            print('Eye not recognized, try left/right')
+        s = df.major_ax / df.minor_ax
+        anchor_ind = np.argmin(np.abs(s - 1))  # find the index of the value closest to 1
+        roundest_frame_num = df['eye_frame'].iloc[anchor_ind]
+        frame = self.get_rotated_frame(roundest_frame_num, eye)
+        minimal_ratio = df.iloc[anchor_ind].ratio
+        reference_x = df.center_x.iloc[anchor_ind]
+        reference_y = df.center_y.iloc[anchor_ind]
+        # plot with scatter for best reference verification:
+        fig, axs = plt.subplots(1, 1, figsize=(15, 10))
+
+        # Scatter plot with points colored by the 'ratio' column
+        sc = axs.scatter(df.center_x, df.center_y, c=df.ratio, cmap='jet', alpha=0.2)
+        axs.scatter(reference_x, reference_y, c='purple', alpha=1, s=40)
+
+        # Add color bar to the plot with enlarged font size
+        cbar = plt.colorbar(sc, ax=axs)
+        cbar.ax.tick_params(labelsize=14)  # Adjust font size of tick labels
+        cbar.set_label('Ratio', fontsize=16)  # Adjust font size of color bar label
+
+        # Adjust font size of axis labels
+        axs.set_xlabel('Center X', fontsize=14)
+        axs.set_ylabel('Center Y', fontsize=14)
+        axs.vlines(320, 240 - 20, 240 + 20)
+        axs.hlines(240, 320 - 20, 320 + 20)
+        axs.axis('equal')
+        axs.imshow(frame, origin='lower', cmap='gray')
+        plt.show()
+        print(f'The reference point returned for this video is: X = {reference_x}, Y = {reference_y}')
+        return reference_x, reference_y
 
     def block_eye_plot(self, export=False, ms_x_axis=True, plot_saccade_locs=False,
                        saccade_frames_l=None, saccade_frames_r=None):
@@ -2518,7 +2663,6 @@ class BlockSync:
             b_output.output_file(filename=str(self.analysis_path / f'pupillometry_block_{self.block_num}.html'),
                                  title=f'block {self.block_num} pupillometry')
         show(b_fig)
-
 
     def pupil_speed_calc(self):
 
@@ -2745,7 +2889,6 @@ class BlockSync:
                 for col in eye.keys():  # for each columm
                     v = eye[col][row]  # get value of location
                     df.at[index_counter, col] = v
-
 
                 print(index_counter, end='\r', flush=True)
                 index_counter += 1

@@ -107,7 +107,12 @@ class OERecording:
         self.accel_files = sorted([i.name for i in oe_metadata_file_path.parent.iterdir() if ('AUX' in str(i))],
                                   key=lambda x: self.extract_number_from_file(x, suffix='continuous'))
 
-    def get_data(self, channels, start_time_ms, window_ms, convert_to_mv=True, return_timestamps=True):
+    def get_data(self, channels,
+                 start_time_ms,
+                 window_ms,
+                 convert_to_mv=True,
+                 return_timestamps=True,
+                 repress_output=False):
         """
         This is a translated matlab function that efficiently retrieves data from Open-Ephys format neural recordings
         :param self: an OERecording class obj. with a metadata file created by the matlab class with the same name
@@ -116,6 +121,7 @@ class OERecording:
         :param window_ms: a single value, the length of the sampling window from each startTime [ms_value]
         :param convert_to_mv: when True, turns the output into the mV representation of the sampled data
         :param return_timestamps: when True, the output will include sample timestamps from 0 in ms
+        :param repress_output: when True, will not perform print commands
         :return: data_matrix - an array with the shape [n_channels, n_windows, nSamples] with int16 / mV values
         """
         window_samples = int(
@@ -151,7 +157,6 @@ class OERecording:
                 # this collects the indices to start reading from
                 read_start_indices.append(p_single_trial_time_stamps[0])
             except IndexError:
-                print('hi')
                 read_start_indices.append(p_single_trial_time_stamps)
 
             # Calculate time stamps in milliseconds based on sampling freq & record block length
@@ -171,7 +176,8 @@ class OERecording:
             # Due to rounding issues, there may be an error when there is one sample too much -
             # in this case the last sample is removed
             if np.sum(p_rec_idx[i]) == window_samples + 1:
-                print(f'sample removed for window #{i}')
+                if repress_output is not True:
+                    print(f'sample removed for window #{i}')
                 p_rec_idx[i][0, np.where(p_rec_idx[i][0, :] == 1)[0][0]] = False
 
         p_rec_idx = np.hstack(p_rec_idx)  # Concatenate record indices into a single array
@@ -196,7 +202,16 @@ class OERecording:
                     # (Notice datatype is non-flexible in this version of the function!!!)
                     data_plus_breaks = np.fromfile(fid, dtype=np.dtype('>i2'), count=total_bytes, sep='')
                     # reshape into an array with a column-per-record shape:
-                    data_plus_breaks = data_plus_breaks.reshape(int(records_per_trial_list[j]), read_size + skip_size)
+                    try:
+                        data_plus_breaks = data_plus_breaks.reshape(int(records_per_trial_list[j]),
+                                                                    read_size + skip_size)
+                    except ValueError:
+                        print('There was a problem reshaping ...', data_plus_breaks)
+                        if return_timestamps:
+                            return None, None
+                        else:
+                            return None
+
                     # slice the array to get rid of the skip_data at the end of each column (record):
                     clean_data = data_plus_breaks[:, : read_size]
                     # transpose and store the current_rec data:
@@ -209,9 +224,10 @@ class OERecording:
             # put the data in the final data_matrix waveform matrix:
             # check for end-of-recording exceedance :
             if len(data_vec) < int(window_samples) * n_windows:
-                print(f'The requested data segment between {read_start_indices[j]} ms and '
-                      f'{read_start_indices[j] + window_ms} ms exceeds the recording length, '
-                      f'and will be 0-padded to fit the other windows')
+                if repress_output is not True:
+                    print(f'The requested data segment between {read_start_indices[j]} ms and '
+                          f'{read_start_indices[j] + window_ms} ms exceeds the recording length, '
+                          f'and will be 0-padded to fit the other windows')
                 num_zeros = (int(window_samples) * n_windows) - len(data_vec)
                 data_vec = np.pad(data_vec, (0, num_zeros), mode='constant')
             data_matrix[:, :, i] = data_vec.reshape(int(window_samples), n_windows, order='F')
