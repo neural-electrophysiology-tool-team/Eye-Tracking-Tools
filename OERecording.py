@@ -246,6 +246,7 @@ class OERecording:
             return data_matrix
 
     def get_analog_data(self, channels, start_time_ms, window_ms, convert_to_mv=True, return_timestamps=True):
+        # TODO: log, collect index failure positions to understand when it happens
         """
         This is a translated matlab function that efficiently retrieves data from Open-Ephys format neural recordings
         :param self: an OERecording class obj. with a metadata file created by the matlab class with the same name
@@ -289,8 +290,10 @@ class OERecording:
                 # this collects the indices to start reading from
                 read_start_indices.append(p_single_trial_time_stamps[0])
             except IndexError:
-                print('hi')
+                print('Index error again - FIX ME PLEASE')
                 read_start_indices.append(p_single_trial_time_stamps)
+                print(p_single_trial_time_stamps)  # This is debug step 1
+                print(type(p_single_trial_time_stamps))
 
             # Calculate time stamps in milliseconds based on sampling freq & record block length
             single_trial_time_stamps = np.round(self.allTimeStamps[0][
@@ -303,7 +306,7 @@ class OERecording:
             time_idx = np.tile((np.arange(self.dataSamplesPerRecord) * self.sample_ms).reshape(-1, 1),
                                (1, records_per_trial)) + single_trial_time_stamps.reshape(1, -1)
             # Find time indices within the requested time window
-            # (chunks are 1024 in size so they are usually cut for most time windows, result is as a boolean matrix)
+            # (chunks are 1024 in size, so they are usually cut for most time windows, result is as a boolean matrix)
             p_rec_idx.append((time_idx >= start_time_ms[0][i]) & (time_idx < (start_time_ms[0][i] + window_ms)))
 
             # Due to rounding issues, there may be an error when there is one sample too much -

@@ -253,6 +253,7 @@ class BlockSync:
         self.right_rotation_angle = None
         self.right_eye_data = None
         self.left_eye_data = None
+        self.liz_mov_df = None
 
     def __str__(self):
         return str(f'{self.animal_call}, block {self.block_num}, on {self.exp_date_time}')
@@ -1212,12 +1213,13 @@ class BlockSync:
         pupil_ys = pupil_ys[good_points]
 
         # Do the same for the edges
-        # edge_elements = [x for x in data.columns if 'edge' in x]
-        # edge_xs = data[edge_elements[np.arange(0,len(edge_elements),3)]]
-        # edge_ys = data[edge_elements[np.arange(1,len(edge_elements),3)]]
-        # edge_ps = data[edge_elements[np.arange(2,len(edge_elements),3)]]
-        # edge_ps = edge_ps.rename(columns=dict(zip(edge_ps.columns,edge_xs.columns)))
-        # edge_ys = edge_ys.rename(columns=dict(zip(edge_ys.columns,edge_xs.columns)))
+        edge_elements = np.array([x for x in data.columns if 'edge' in x])
+        edge_xs_before_flip = data[edge_elements[np.arange(0, len(edge_elements), 3)]]
+        edge_xs = 320 * 2 - edge_xs_before_flip
+        edge_ys = data[edge_elements[np.arange(1, len(edge_elements), 3)]]
+        edge_ps = data[edge_elements[np.arange(2,len(edge_elements),3)]]
+        edge_ps = edge_ps.rename(columns=dict(zip(edge_ps.columns,edge_xs.columns)))
+        edge_ys = edge_ys.rename(columns=dict(zip(edge_ys.columns,edge_xs.columns)))
         # e = edge_ps < uncertainty_thr
 
         # work row by row to figure out the ellipses
@@ -1243,26 +1245,30 @@ class BlockSync:
             else:
                 ellipses.append([np.nan, np.nan, np.nan, np.nan, np.nan])
 
-            # caudal_edge = [
-            #     float(data['Caudal_edge'][row]),
-            #     float(data['Caudal_edge.1'][row])
-            # ]
-            # rostral_edge = [
-            #     float(data['Rostral_edge'][row]),
-            #     float(data['Rostral_edge.1'][row])
-            # ]
-            # caudal_edge_ls.append(caudal_edge)
-            # rostral_edge_ls.append(rostral_edge)
-            # if row % 50 == 0:
-            #   print(f'just finished with {row} out of {len(data)-1}', end='\r',flush=True)
+            caudal_edge = [
+                float(data['Caudal_edge'][row]),
+                float(data['Caudal_edge.1'][row])
+            ]
+            rostral_edge = [
+                float(data['Rostral_edge'][row]),
+                float(data['Rostral_edge.1'][row])
+            ]
+            caudal_edge_ls.append(caudal_edge)
+            rostral_edge_ls.append(rostral_edge)
 
         ellipse_df = pd.DataFrame(columns=['center_x', 'center_y', 'width', 'height', 'phi'], data=ellipses)
+
+        ellipse_df[['caudal_edge_x', 'caudal_edge_y']] = pd.DataFrame(ellipse_df['caudal_edge'].tolist(),
+                                                                      index=ellipse_df.index)
+        ellipse_df[['rostral_edge_x', 'rostral_edge_y']] = pd.DataFrame(ellipse_df['rostral_edge'].tolist(),
+                                                                        index=ellipse_df.index)
+
         a = np.array(ellipse_df['height'][:])
         b = np.array(ellipse_df['width'][:])
         ellipse_size_per_frame = a * b * math.pi
         ellipse_df['ellipse_size'] = ellipse_size_per_frame
-        # ellipse_df['rostral_edge'] = rostral_edge_ls
-        # ellipse_df['caudal_edge'] = caudal_edge_ls
+        ellipse_df['rostral_edge'] = rostral_edge_ls
+        ellipse_df['caudal_edge'] = caudal_edge_ls
 
         print(f'\n ellipses calculation complete')
         return ellipse_df
@@ -1325,6 +1331,56 @@ class BlockSync:
             self.re_df.to_csv(self.analysis_path / 're_df.csv')
             self.le_df.to_csv(self.analysis_path / 'le_df.csv')
 
+    def calibrate_pixel_size_manual(self, known_dist, overwrite=False):
+        """
+        This function takes in a known distance in mm and returns a calculation of the pixel size in each video
+        according to an ROI of given known distance in the L/R frames
+        :param block: BlockSync object of a trial with eye videos
+        :param known_dist: The distance to use for calibration measured in mm
+        :param overwrite: If True will run the method even if the output df already exists
+        :return: L and R values for pixel real-world size [in mm]
+        """
+        # first check if this calibration already exists for the block:
+        if not overwrite:
+            if (self.analysis_path / 'LR_pix_size.csv').exists():
+                internal_df = pd.read_csv(self.analysis_path / 'LR_pix_size.csv')
+                self.L_pix_size = internal_df.at[0, 'L_pix_size']
+                self.R_pix_size = internal_df.at[0, 'R_pix_size']
+                print("got the calibration values from the analysis folder")
+                return
+
+        # get the first frames of both eyes as reference images
+        # define the eye VideoCaptures
+        rcap = cv2.VideoCapture(self.re_videos[0])
+        lcap = cv2.VideoCapture(self.le_videos[0])
+
+        # get the second frames:
+        lcap.set(1, 1)
+        lret, lframe = lcap.read()
+        rcap.set(1, 1)
+        rret, rframe = rcap.read()
+        if rret and lret:
+            Rroi = cv2.selectROI(
+                "select the area of the known measurement through the diagonal of the ROI", rframe)
+            Lroi = cv2.selectROI(
+                "select the area of the known measurement through the diagonal of the ROI", lframe)
+        else:
+            print('some trouble with the video retrieval, check paths and try again')
+        R_dist = np.sqrt(Rroi[2] ** 2 + Rroi[3] ** 2)
+        L_dist = np.sqrt(Lroi[2] ** 2 + Lroi[3] ** 2)
+
+        self.L_pix_size = known_dist / L_dist
+        self.R_pix_size = known_dist / R_dist
+
+        cv2.destroyAllWindows()
+
+        # save these values to a dataframe for re-initializing the block:
+        internal_df = pd.DataFrame(columns=['L_pix_size', 'R_pix_size'])
+        internal_df.at[0, 'L_pix_size'] = self.L_pix_size
+        internal_df.at[0, 'R_pix_size'] = self.R_pix_size
+        internal_df.to_csv(self.analysis_path / 'LR_pix_size.csv', index=False)
+        print(f'exported to {self.analysis_path / "LR_pix_size.csv"}')
+
     def calibrate_pixel_size(self, known_dist, overwrite=False):
         """
         This function takes in a known distance in mm and returns a calculation of the pixel size in each video
@@ -1369,7 +1425,7 @@ class BlockSync:
         cv2.destroyAllWindows()
 
         # save these values to a dataframe for re-initializing the block:
-        internal_df = pd.DataFrame(columns=['L_pix_size','R_pix_size'])
+        internal_df = pd.DataFrame(columns=['L_pix_size', 'R_pix_size'])
         internal_df.at[0, 'L_pix_size'] = self.L_pix_size
         internal_df.at[0, 'R_pix_size'] = self.R_pix_size
         internal_df.to_csv(self.analysis_path / 'LR_pix_size.csv', index=False)
@@ -3370,3 +3426,27 @@ class BlockSync:
 
         return saccade_dict
 
+    def block_get_lizard_movement(self):
+        # collect accelerometer data
+        # path definition
+        p = self.oe_path / 'analysis'
+        analysis_list = os.listdir(p)
+        correct_analysis = [i for i in analysis_list if self.animal_call in i][0]
+        p = p / str(correct_analysis)
+        mat_path = p / 'lizMov.mat'
+        print(f'path to mat file is {mat_path}')
+        # read mat file
+        try:
+            mat_data = h5py.File(str(mat_path), 'r')
+            mat_dict = {'t_mov_ms': mat_data['t_mov_ms'][:],
+                        'movAll': mat_data['movAll'][:]}
+
+            acc_df = pd.DataFrame(data=np.array([mat_dict['t_mov_ms'][:, 0], mat_dict['movAll'][:, 0]]).T,
+                                  columns=['t_mov_ms', 'movAll'])
+            mat_data.close()
+            self.liz_mov_df = acc_df
+            print(f'liz_mov_df created for {self}')
+        except FileNotFoundError:
+            print('mat file does not exist - run the matlab getLizMovement function')
+
+        return
