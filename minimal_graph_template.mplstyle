@@ -1,0 +1,32 @@
+# minimal_high_quality.mplstyle
+axes.titlesize: 16           # Title font size
+axes.labelsize: 14           # Axis label font size
+xtick.labelsize: 12          # X-tick label font size
+ytick.labelsize: 12          # Y-tick label font size
+legend.fontsize: 12          # Legend font size
+figure.figsize: 10, 6        # Default figure size
+lines.linewidth: 2           # Line width
+# Default line color (use standard color names or HEX)
+lines.color: blue             # Change to a named color or HEX code
+
+# Background and grid settings
+axes.facecolor: white         # Axes background color
+figure.facecolor: white       # Figure background color
+axes.edgecolor: black         # Axes edge color
+
+# Grid settings
+grid.color: white             # Grid color (set to white to hide)
+grid.linestyle: -             # Grid line style
+grid.linewidth: 0.5           # Grid line width
+
+# Tick settings
+xtick.major.size: 5          # Major tick length
+ytick.major.size: 5          # Major tick length
+xtick.minor.size: 3          # Minor tick length
+ytick.minor.size: 3          # Minor tick length
+xtick.direction: in           # Direction of ticks
+ytick.direction: in           # Direction of ticks
+
+# Font settings
+font.family: sans-serif       # Font family
+font.sans-serif: Arial        # Sans-serif font type

@@ -309,7 +309,7 @@ def parse_dataset_to_df(saccade_dict, blocklist):
 
 
 def plot_kde(ax, x, y, nbins, title, xlim=False, ylim=False, global_max=None, global_min=None):
-    k = kde.gaussian_kde(np.array([x, y]).astype(np.float))
+    k = kde.gaussian_kde(np.array([x, y]).astype(float))
 
     if global_max and global_min:
         minimal_coordinate = global_min

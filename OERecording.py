@@ -246,7 +246,6 @@ class OERecording:
             return data_matrix
 
     def get_analog_data(self, channels, start_time_ms, window_ms, convert_to_mv=True, return_timestamps=True):
-        # TODO: log, collect index failure positions to understand when it happens
         """
         This is a translated matlab function that efficiently retrieves data from Open-Ephys format neural recordings
         :param self: an OERecording class obj. with a metadata file created by the matlab class with the same name

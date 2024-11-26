@@ -670,14 +670,14 @@ class BlockSync:
         else:
             return index_of_lowest_diff
 
-    def synchronize_block(self, export=True):
+    def synchronize_block(self, export=True, overwrite=False):
         """
         This method builds a synced_videos dataframe
         1. The arena video is used as anchor
         2. The different anchor timestamps are aligned with the closest frames of the other sources
         """
         # check if there is an exported version of the blocksync_df:
-        if pathlib.Path(self.analysis_path / 'blocksync_df.csv').exists():
+        if pathlib.Path(self.analysis_path / 'blocksync_df.csv').exists() and overwrite is False:
             self.blocksync_df = pd.read_csv(pathlib.Path(self.analysis_path / 'blocksync_df.csv'), engine='python')
             print('blocksync_df loaded from analysis folder')
             return self.blocksync_df
@@ -700,6 +700,78 @@ class BlockSync:
                                          index=arena_tf.Arena_TTL)
         for i, t in enumerate(tqdm(arena_tf.Arena_TTL)):
             arena_frame = arena_tf.Arena_TTL_frame.iloc[i]
+            l_eye_frame = l_eye_tf['L_eye_TTL_frame'].iloc[self.get_closest_frame(t, l_eye_tf['L_eye_TTL'])]
+            r_eye_frame = r_eye_tf['R_eye_TTL_frame'].iloc[self.get_closest_frame(t, r_eye_tf['R_eye_TTL'])]
+            self.blocksync_df.loc[t] = [arena_frame, l_eye_frame, r_eye_frame]
+        print('created blocksync_df')
+        if export:
+            self.blocksync_df.to_csv(self.analysis_path / 'blocksync_df.csv')
+            print(f'exported blocksync_df to {self.analysis_path}/ blocksync_df.csv')
+
+    def synchronize_block_for_non_60fps_acquisition(self,
+                                                    export=True,
+                                                    overwrite=False,
+                                                    target_frame_rate=60,
+                                                    margin_of_error=0.1):
+        """
+        This method builds a synced_videos dataframe
+        1. The arena video is used as anchor
+        2. The different anchor timestamps are aligned with the closest frames of the other sources
+        """
+        # check if there is an exported version of the blocksync_df:
+        if pathlib.Path(self.analysis_path / 'blocksync_df.csv').exists() and overwrite is False:
+            self.blocksync_df = pd.read_csv(pathlib.Path(self.analysis_path / 'blocksync_df.csv'), engine='python')
+            print('blocksync_df loaded from analysis folder')
+            return self.blocksync_df
+        else:
+            print('creating blocksync_df')
+
+        # define block_starts + block_ends
+        start_time = max([self.arena_vid_first_t, self.r_vid_first_t, self.l_vid_first_t])
+        end_time = min([self.arena_vid_last_t, self.r_vid_last_t, self.l_vid_last_t])
+
+        # Step 1: Calculate the frame rate of the arena video
+        arena_ttls = self.oe_events.query('@start_time < Arena_TTL < @end_time')['Arena_TTL']
+        arena_ttl_diff = np.diff(arena_ttls)
+        arena_frame_rate = self.sample_rate / np.median(arena_ttl_diff)
+
+        if not (target_frame_rate - margin_of_error <= arena_frame_rate <= target_frame_rate + margin_of_error):
+            print(f"Arena video frame rate is {arena_frame_rate:.2f} Hz. Adjusting to {target_frame_rate} FPS.")
+
+            # Calculate frame interval for the target frame rate
+            frame_interval = round(self.sample_rate / target_frame_rate)  # Samples per frame for target FPS
+            new_arena_ttl = [arena_ttls.iloc[0]]  # Start with the first TTL
+
+            for i in range(1, len(arena_ttls)):
+                current_ttl = round(arena_ttls.iloc[i])
+                previous_ttl = new_arena_ttl[-1]
+                while current_ttl - previous_ttl > frame_interval:
+                    previous_ttl += frame_interval
+                    new_arena_ttl.append(previous_ttl)
+                new_arena_ttl.append(current_ttl)
+
+            arena_interpolated_ttls = pd.DataFrame({
+                'Arena_TTL': new_arena_ttl
+            })
+
+        else:
+            print(
+                f"Arena video frame rate is {arena_frame_rate:.2f} Hz, within acceptable range. No adjustment needed.")
+            arena_interpolated_ttls = self.oe_events.query('@start_time < Arena_TTL < @end_time')[['Arena_TTL']]
+
+        # create a loop that goes over the series of arena timestamps between start and end of block:
+        arena_tf = self.oe_events.query('@start_time < Arena_TTL < @end_time')[['Arena_TTL', 'Arena_TTL_frame']]
+        r_eye_tf = self.oe_events.query('@start_time < Arena_TTL < @end_time or Arena_TTL != Arena_TTL')[
+            ['R_eye_TTL', 'R_eye_TTL_frame']]
+        r_eye_tf = r_eye_tf[np.invert(np.isnan(r_eye_tf.R_eye_TTL.values))]  # this removes nan values
+        l_eye_tf = self.oe_events.query('@start_time < Arena_TTL < @end_time or Arena_TTL != Arena_TTL')[
+            ['L_eye_TTL', 'L_eye_TTL_frame']]
+        l_eye_tf = l_eye_tf[np.invert(np.isnan(l_eye_tf.L_eye_TTL.values))]  # this removes nan values
+        # create a dataframe for the synchronization
+        self.blocksync_df = pd.DataFrame(columns=['Arena_frame', 'L_eye_frame', 'R_eye_frame'],
+                                         index=arena_interpolated_ttls.Arena_TTL)
+        for i, t in enumerate(tqdm(arena_interpolated_ttls.Arena_TTL)):
+            arena_frame = arena_tf['Arena_TTL_frame'].iloc[self.get_closest_frame(t, arena_tf['Arena_TTL'])]
             l_eye_frame = l_eye_tf['L_eye_TTL_frame'].iloc[self.get_closest_frame(t, l_eye_tf['L_eye_TTL'])]
             r_eye_frame = r_eye_tf['R_eye_TTL_frame'].iloc[self.get_closest_frame(t, r_eye_tf['R_eye_TTL'])]
             self.blocksync_df.loc[t] = [arena_frame, l_eye_frame, r_eye_frame]
@@ -1217,9 +1289,9 @@ class BlockSync:
         edge_xs_before_flip = data[edge_elements[np.arange(0, len(edge_elements), 3)]]
         edge_xs = 320 * 2 - edge_xs_before_flip
         edge_ys = data[edge_elements[np.arange(1, len(edge_elements), 3)]]
-        edge_ps = data[edge_elements[np.arange(2,len(edge_elements),3)]]
-        edge_ps = edge_ps.rename(columns=dict(zip(edge_ps.columns,edge_xs.columns)))
-        edge_ys = edge_ys.rename(columns=dict(zip(edge_ys.columns,edge_xs.columns)))
+        edge_ps = data[edge_elements[np.arange(2, len(edge_elements), 3)]]
+        edge_ps = edge_ps.rename(columns=dict(zip(edge_ps.columns, edge_xs.columns)))
+        edge_ys = edge_ys.rename(columns=dict(zip(edge_ys.columns, edge_xs.columns)))
         # e = edge_ps < uncertainty_thr
 
         # work row by row to figure out the ellipses
@@ -1258,10 +1330,6 @@ class BlockSync:
 
         ellipse_df = pd.DataFrame(columns=['center_x', 'center_y', 'width', 'height', 'phi'], data=ellipses)
 
-        ellipse_df[['caudal_edge_x', 'caudal_edge_y']] = pd.DataFrame(ellipse_df['caudal_edge'].tolist(),
-                                                                      index=ellipse_df.index)
-        ellipse_df[['rostral_edge_x', 'rostral_edge_y']] = pd.DataFrame(ellipse_df['rostral_edge'].tolist(),
-                                                                        index=ellipse_df.index)
 
         a = np.array(ellipse_df['height'][:])
         b = np.array(ellipse_df['width'][:])
@@ -1269,6 +1337,10 @@ class BlockSync:
         ellipse_df['ellipse_size'] = ellipse_size_per_frame
         ellipse_df['rostral_edge'] = rostral_edge_ls
         ellipse_df['caudal_edge'] = caudal_edge_ls
+        ellipse_df[['caudal_edge_x', 'caudal_edge_y']] = pd.DataFrame(ellipse_df['caudal_edge'].tolist(),
+                                                                      index=ellipse_df.index)
+        ellipse_df[['rostral_edge_x', 'rostral_edge_y']] = pd.DataFrame(ellipse_df['rostral_edge'].tolist(),
+                                                                        index=ellipse_df.index)
 
         print(f'\n ellipses calculation complete')
         return ellipse_df
@@ -1550,6 +1622,7 @@ class BlockSync:
         return expanded_indices
 
     def find_led_blink_frames(self, plot=False):
+
         r_vals = self.re_frame_val_list[0][1]
         l_vals = self.le_frame_val_list[0][1]
 
@@ -2566,6 +2639,10 @@ class BlockSync:
         # Calculate major and minor axes using vectorized operations
         df['major_ax'] = np.nanmax(df[['width', 'height']], axis=1)
         df['minor_ax'] = np.nanmin(df[['width', 'height']], axis=1)
+
+        # Handle cases where both width and height are NaN
+        nan_mask = df[['width', 'height']].isna().all(axis=1)
+        df.loc[nan_mask, ['major_ax', 'minor_ax', 'ratio']] = np.nan
 
         # Define the axes ratio of the ellipse as major/minor
         df['ratio'] = df['major_ax'] / df['minor_ax']
