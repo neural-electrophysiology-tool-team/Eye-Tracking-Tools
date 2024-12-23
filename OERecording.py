@@ -49,6 +49,7 @@ class OERecording:
             self.mat_file = h5py.File(str(oe_metadata_file_path), 'r')
         except Exception:
             print(f'an error occured while trying to reach {str(oe_metadata_file_path)}, check matlab output format!')
+
             if self.mat_file is not None:
                 self.mat_file.close()
 

@@ -456,7 +456,7 @@ class BlockSync:
         self.re_videos = [vid for vid in glob.glob(str(self.block_path) + r'\eye_videos\RE\**\*.mp4') if
                           "DLC" not in vid]
 
-    def get_eye_brightness_vectors(self, threshold_value=30, export=True):
+    def get_eye_brightness_vectors_deprecated(self, threshold_value=30, export=True):
         """
         This is a utility function that generates the eye brightness vectors for later synchronization
         This step should be performed by a long looper over all data before synchronization
@@ -497,6 +497,131 @@ class BlockSync:
 
                 with open(export_path, 'wb') as file:
                     pickle.dump(frame_val_dict, file)
+
+    @staticmethod
+    def produce_frame_val_list_with_roi(vid_path, roi, threshold_value):
+        """
+        Calculate mean pixel values within a user-defined ROI for each frame.
+
+        Parameters
+        ----------
+        vid_path: str
+            Path to the video for analysis
+
+        roi: tuple
+            User-defined ROI for the video
+
+        threshold_value: float
+            The threshold to use in order to concentrate on LEDs
+
+        Returns
+        -------
+        frame_val_list: list
+            A list of mean pixel values for each frame after threshold
+        """
+        print(f'Working on video {vid_path}')
+        cap = cv2.VideoCapture(vid_path)
+
+        if not cap.isOpened():
+            print(f"Error: Cannot open video {vid_path}")
+            return []
+
+        frame_val_list = []
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        for _ in tqdm(range(total_frames), desc=f'Processing {vid_path}', unit='frame'):
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            # Crop frame to ROI
+            x, y, w, h = map(int, roi)
+            cropped_frame = frame[y:y + h, x:x + w]
+
+            # Convert to grayscale and apply threshold
+            gray_frame = cv2.cvtColor(cropped_frame, cv2.COLOR_BGR2GRAY)
+            _, thresh_frame = cv2.threshold(gray_frame, threshold_value, 255, cv2.THRESH_TOZERO)
+
+            # Calculate mean brightness
+            mean_val = np.mean(thresh_frame)
+            frame_val_list.append(mean_val)
+
+        cap.release()
+        print(f'Finished video {vid_path}, processed {len(frame_val_list)} frames')
+        return frame_val_list
+
+    def get_eye_brightness_vectors(self, threshold_value=30, export=True):
+        """
+        This is a utility function that generates the eye brightness vectors for later synchronization.
+        This step should be performed by a long looper over all data before synchronization.
+
+        Parameters
+        ----------
+        threshold_value: float
+            The threshold value to use as mask before calculating brightness
+        export: bool
+            If True, will export the vectors into two .csv files
+
+        Returns
+        -------
+        None
+        """
+        print(f'Getting eye brightness values for block {self.block_num}...')
+
+        if self.le_videos is None:
+            self.le_videos = [vid for vid in glob.glob(str(self.block_path) + r'\eye_videos\LE\**\*.mp4') if
+                              "DLC" not in vid]
+        if self.re_videos is None:
+            self.re_videos = [vid for vid in glob.glob(str(self.block_path) + r'\eye_videos\RE\**\*.mp4') if
+                              "DLC" not in vid]
+
+        p = self.analysis_path / 'eye_brightness_values_dict.pkl'
+        if p.is_file():
+            print('Found an existing file!')
+            with open(p, 'rb') as file:
+                eye_brightness_dict = pickle.load(file)
+                self.le_frame_val_list = eye_brightness_dict.get('left_eye', None)
+                self.re_frame_val_list = eye_brightness_dict.get('right_eye', None)
+        else:
+            answer = input('No eye brightness file exists. Want to create it? (no / any other answer): ')
+            if answer.lower() == 'no':
+                return
+
+            # Select ROIs for both videos
+            rois = {}
+            for eye, vid in zip(['Left Eye', 'Right Eye'], [self.le_videos[0], self.re_videos[0]]):
+                cap = cv2.VideoCapture(vid)
+                if not cap.isOpened():
+                    print(f"Error: Cannot open video {vid}")
+                    continue
+
+                ret, frame = cap.read()
+                if not ret:
+                    print(f"Error: Cannot read the first frame of {vid}")
+                    cap.release()
+                    continue
+
+                roi = cv2.selectROI(f"Select ROI for {eye}", frame, showCrosshair=True, fromCenter=False)
+                rois[eye] = roi
+                cv2.destroyWindow(f"Select ROI for {eye}")
+                cap.release()
+
+            # Calculate brightness vectors
+            self.le_frame_val_list = produce_frame_val_list_with_roi(self.le_videos[0], rois['Left Eye'],
+                                                                     threshold_value)
+            self.re_frame_val_list = produce_frame_val_list_with_roi(self.re_videos[0], rois['Right Eye'],
+                                                                     threshold_value)
+
+            if export:
+                export_path = p
+                frame_val_dict = {
+                    'left_eye': self.le_frame_val_list,
+                    'right_eye': self.re_frame_val_list
+                }
+                with open(export_path, 'wb') as file:
+                    pickle.dump(frame_val_dict, file)
+
+        print("Eye brightness vectors generation complete.")
 
     def load_eye_brightness_vectors(self, threshold_value=30, export=True):
         """
@@ -1623,9 +1748,13 @@ class BlockSync:
 
     def find_led_blink_frames(self, plot=False):
 
-        r_vals = self.re_frame_val_list[0][1]
-        l_vals = self.le_frame_val_list[0][1]
-
+        try:
+            r_vals = self.re_frame_val_list[0][1]
+            l_vals = self.le_frame_val_list[0][1]
+        except IndexError:
+            print('hi new version')
+            r_vals = self.re_frame_val_list
+            l_vals = self.le_frame_val_list
         print('collecting left-eye data')
         l_peaks = self.collect_lights_out_events(data=l_vals,
                                                  plot=plot,
@@ -2403,8 +2532,13 @@ class BlockSync:
         Returns:
             tuple: A tuple containing two pandas DataFrame objects, representing the corrected left and right eye data.
         """
-        r_vals = self.re_frame_val_list[0][1]
-        l_vals = self.le_frame_val_list[0][1]
+        try:
+            r_vals = self.re_frame_val_list[0][1]
+            l_vals = self.le_frame_val_list[0][1]
+        except IndexError:
+            print('hi new version')
+            r_vals = self.re_frame_val_list
+            l_vals = self.le_frame_val_list
         l_blinks = self.led_blink_frames_l
         r_blinks = self.led_blink_frames_r
         chunks_r = np.insert(np.diff(r_blinks) > 10, 0, False)
@@ -2541,8 +2675,12 @@ class BlockSync:
 
     def correct_eye_sync_based_on_OE_LED_events(self):
         # get the brightness values of the frames for each eye
-        r_vals = self.re_frame_val_list[0][1]
-        l_vals = self.le_frame_val_list[0][1]
+        try:
+            r_vals = self.re_frame_val_list[0][1]
+            l_vals = self.le_frame_val_list[0][1]
+        except IndexError:
+            r_vals = self.re_frame_val_list
+            l_vals = self.le_frame_val_list
 
         # get the blink frames
         l_blinks = self.led_blink_frames_l
@@ -3516,7 +3654,10 @@ class BlockSync:
         try:
             mat_data = h5py.File(str(mat_path), 'r')
             mat_dict = {'t_mov_ms': mat_data['t_mov_ms'][:],
-                        'movAll': mat_data['movAll'][:]}
+                        'movAll': mat_data['movAll'][:],
+                        't_static_ms':mat_data['t_static_ms'],
+                        'staticAll':mat_data['staticAll'],
+                        'angles':mat_data['angles']}
 
             acc_df = pd.DataFrame(data=np.array([mat_dict['t_mov_ms'][:, 0], mat_dict['movAll'][:, 0]]).T,
                                   columns=['t_mov_ms', 'movAll'])
