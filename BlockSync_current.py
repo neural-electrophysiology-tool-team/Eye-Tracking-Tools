@@ -235,6 +235,8 @@ class BlockSync:
         self.l_saccades_chunked = None
         self.L_pix_size = None
         self.R_pix_size = None
+        self.L_focal_length = None
+        self.R_focal_length = None
         self.eye_diff_mode = None
         self.zeroth_sample_number = None
         self.get_zeroth_sample_number()
@@ -450,7 +452,11 @@ class BlockSync:
         for vid in videos_to_stamp:
             if stamp + '.mp4' not in str(vid):
                 print('stamping LE video')
-                os.rename(vid, fr'{vid[:-4]}_{stamp}{vid[-4:]}')
+                try:
+                    os.rename(vid, fr'{vid[:-4]}_{stamp}{vid[-4:]}')
+                except FileExistsError as e:
+                    print('could not re-stamp the video because the label is already there')
+
         self.le_videos = [vid for vid in glob.glob(str(self.block_path) + r'\eye_videos\LE\**\*.mp4') if
                           "DLC" not in vid]
         self.re_videos = [vid for vid in glob.glob(str(self.block_path) + r'\eye_videos\RE\**\*.mp4') if
@@ -607,9 +613,9 @@ class BlockSync:
                 cap.release()
 
             # Calculate brightness vectors
-            self.le_frame_val_list = produce_frame_val_list_with_roi(self.le_videos[0], rois['Left Eye'],
+            self.le_frame_val_list = self.produce_frame_val_list_with_roi(self.le_videos[0], rois['Left Eye'],
                                                                      threshold_value)
-            self.re_frame_val_list = produce_frame_val_list_with_roi(self.re_videos[0], rois['Right Eye'],
+            self.re_frame_val_list = self.produce_frame_val_list_with_roi(self.re_videos[0], rois['Right Eye'],
                                                                      threshold_value)
 
             if export:
@@ -1146,8 +1152,12 @@ class BlockSync:
             if self.re_frame_val_list is None:
                 self.re_frame_val_list = self.produce_frame_val_list(self.re_videos, threshold_value)
 
-            self.l_eye_values = stats.zscore(self.le_frame_val_list[0][1])
-            self.r_eye_values = stats.zscore(self.re_frame_val_list[0][1])
+            try: # This is for legacy version of the produce_eye_brightness_values function
+                self.l_eye_values = stats.zscore(self.le_frame_val_list[0][1])
+                self.r_eye_values = stats.zscore(self.re_frame_val_list[0][1])
+            except IndexError:
+                self.l_eye_values = stats.zscore(self.le_frame_val_list)
+                self.r_eye_values = stats.zscore(self.re_frame_val_list)
 
             df = self.blocksync_df.merge(
                 right=pd.DataFrame(self.l_eye_values, columns=['L_values']).reset_index(),
@@ -1628,8 +1638,28 @@ class BlockSync:
         internal_df.to_csv(self.analysis_path / 'LR_pix_size.csv', index=False)
         print(f'exported to {self.analysis_path / "LR_pix_size.csv"}')
 
-    # jitter detection algorithm starts here:
+    def set_focal_length(self, left_eye_focal_length, right_eye_focal_length, overwrite=False):
+        # first check if this calibration already exists for the block:
+        if not overwrite:
+            if (self.analysis_path / 'LR_focal_length.csv').exists():
+                internal_df = pd.read_csv(self.analysis_path / 'LR_focal_length.csv')
+                self.L_focal_length = internal_df.at[0, 'L_focal_length']
+                self.R_focal_length = internal_df.at[0, 'R_focal_length']
+                print("got the focal length values from the analysis folder")
+                return
 
+        self.L_focal_length = left_eye_focal_length
+        self.R_focal_length = right_eye_focal_length
+
+        # save these values to a dataframe for re-initializing the block:
+        internal_df = pd.DataFrame(columns=['L_focal_length', 'R_focal_length'])
+        internal_df.at[0, 'L_focal_length'] = self.L_focal_length
+        internal_df.at[0, 'R_focal_length'] = self.R_focal_length
+        internal_df.to_csv(self.analysis_path / 'LR_focal_length.csv', index=False)
+        print(f'exported to {self.analysis_path / "LR_focal_length.csv"}')
+
+
+    # jitter detection algorithm starts here:
     # The following functions deal with robustly removing lights-out frames from the video jitter analysis, could
     # expand these indices to bad video frame removal later:
     @staticmethod
