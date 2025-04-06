@@ -24,6 +24,7 @@ from scipy.signal import find_peaks as scipy_find_peaks
 from matplotlib import pyplot as plt
 import bokeh
 from itertools import cycle
+import datetime
 '''
 This script defines the BlockSync class which takes all of the relevant data for a given trial and can be utilized
 to produce a synchronized dataframe for all video sources to be used for further analysis
@@ -2888,7 +2889,7 @@ class BlockSync:
         rotated_frame = cv2.warpAffine(frame, rotation_matrix, (frame.shape[1], frame.shape[0]))
         return rotated_frame
 
-    # you are here
+
     def get_best_reference(self, eye):
         if eye == 'left':
             df = self.left_eye_data
@@ -2896,6 +2897,7 @@ class BlockSync:
             df = self.right_eye_data
         else:
             print('Eye not recognized, try left/right')
+            return
         s = df.major_ax / df.minor_ax
         anchor_ind = np.argmin(np.abs(s - 1))  # find the index of the value closest to 1
         roundest_frame_num = df['eye_frame'].iloc[anchor_ind]
@@ -2924,7 +2926,114 @@ class BlockSync:
         axs.imshow(frame, origin='lower', cmap='gray')
         plt.show()
         print(f'The reference point returned for this video is: X = {reference_x}, Y = {reference_y}')
+        if eye == 'left':
+            self.kerr_ref_l_x = reference_x
+            self.kerr_ref_l_y = reference_y
+        elif eye == 'right':
+            self.kerr_ref_r_x = reference_x
+            self.kerr_ref_r_y = reference_y
         return reference_x, reference_y
+
+    def load_best_reference(self, ref_file_path):
+        try:
+            ref_points = pd.read_csv(ref_file_path)
+            l_ref_row = ref_points[
+                (ref_points.eye == 'L') & (ref_points.animal == int(self.animal_call.replace('PV_', ''))) & (
+                            ref_points.block == int(self.block_num))]
+            self.kerr_ref_l_x, self.kerr_ref_l_y = l_ref_row.x0.iloc[0], l_ref_row.y0.iloc[0]
+
+            r_ref_row = ref_points[
+                (ref_points.eye == 'R') & (ref_points.animal == int(self.animal_call.replace('PV_', ''))) & (
+                        ref_points.block == int(self.block_num))]
+            self.kerr_ref_r_x, self.kerr_ref_r_y = r_ref_row.x0.iloc[0], r_ref_row.y0.iloc[0]
+            print('found reference file and loaded points')
+        except FileNotFoundError:
+            print(f'no reference file at {ref_file_path}')
+
+    # you are here
+    @staticmethod
+    def kerr(df, aEC=np.nan, bEC=np.nan):
+        if aEC != aEC:
+            print('problem with reference, call the function only with reference point (xy)')
+            return
+
+        theta_values = np.full(len(df), np.nan)  # Initialize theta column with NaNs
+        phi_values = np.full(len(df), np.nan)  # Initialize phi column with NaNs
+        r_values = np.full(len(df), np.nan)  # Initialize r column with NaNs
+
+        # Convert columns to NumPy arrays for faster access
+        hw_values = df['ratio2'].values
+        aPC_values = df['center_x'].values
+        bPC_values = df['center_y'].values
+
+        # Mask for valid `hw` values (to ignore NaNs)
+        valid_mask = ~np.isnan(hw_values)
+
+        # Vectorized computation for `top` and `bot`
+        sqrt_component = np.sqrt(1 - hw_values[valid_mask] ** 2)
+        distances = np.sqrt((aPC_values[valid_mask] - aEC) ** 2 + (bPC_values[valid_mask] - bEC) ** 2)
+
+        top_values = sqrt_component * distances
+        bot_values = (1 - hw_values[valid_mask] ** 2)
+
+        top = np.sum(top_values)
+        bot = np.sum(bot_values)
+
+        f_z = top / bot
+
+        # Compute `r` for all rows where `major_ax` is valid
+        valid_major_ax = ~np.isnan(df['major_ax'].values)
+        max_axes = np.maximum(df['major_ax'].values, df['minor_ax'].values)
+        r_values[valid_major_ax] = (2 * max_axes[valid_major_ax]) / f_z
+
+        # Compute `theta` and `phi` in a vectorized way
+        valid_positions = ~np.isnan(aPC_values) & ~np.isnan(bPC_values)
+
+        # p1 = (aPC_values[valid_positions] - aEC)
+        # p = p1/f_z
+        comp_p = np.arcsin((aPC_values[valid_positions] - aEC) / f_z)
+
+        # t1 = (bPC_values[valid_positions] - bEC)
+        # t2 =  (np.cos(comp_p) * f_z)
+        # t = t1/t2
+        comp_t = np.arcsin((bPC_values[valid_positions] - bEC) / (np.cos(comp_p) * f_z))
+
+        theta_values[valid_positions] = np.degrees(comp_t)
+        phi_values[valid_positions] = np.degrees(comp_p)
+
+        # Create output DataFrame
+        output_df = pd.DataFrame({'r': r_values, 'theta': theta_values, 'phi': phi_values}, index=df.index)
+        output_df = pd.concat([df[['OE_timestamp', 'eye_frame', 'ms_axis']], output_df], axis=1)
+        return f_z, output_df  # , valid_mask, valid_major_ax, valid_positions
+
+    def calculate_kerr_angles(self, name_tag='default'):
+        if self.kerr_ref_l_x is None and self.kerr_ref_r_x is None:
+            print('no references for the kerr calculation, run load / get_best_reference and try again')
+            return
+
+        time = datetime.datetime.now()
+        print(f'working on Block {self.block_num}')
+        print('Left eye')
+
+        l_df = self.left_eye_data
+        l_df['ratio2'] = l_df.minor_ax / l_df.major_ax
+        l_df['phi_ellipse'] = l_df.phi
+
+        f_z, output_df_l = self.kerr(l_df, aEC=self.kerr_ref_l_x, bEC=self.kerr_ref_l_y)
+
+        print('Left eye')
+
+        r_df = self.right_eye_data
+        r_df['ratio2'] = r_df.minor_ax / r_df.major_ax
+        r_df['phi_ellipse'] = r_df.phi
+
+        f_z, output_df_r = self.kerr(r_df, aEC=self.kerr_ref_r_x, bEC=self.kerr_ref_r_y)
+
+        self.right_eye_kerr_angles = output_df_r
+        self.left_eye_kerr_angles = output_df_l
+        self.left_eye_kerr_angles.to_csv(self.analysis_path / f'left_kerr_angle_{name_tag}.csv')
+        self.right_eye_kerr_angles.to_csv(self.analysis_path / f'right_kerr_angle_{name_tag}.csv')
+        print(f'finished successfully and saved to {self.analysis_path} with tag= {name_tag}')
 
     def block_eye_plot(self, export=False, ms_x_axis=True, plot_saccade_locs=False,
                        saccade_frames_l=None, saccade_frames_r=None):
