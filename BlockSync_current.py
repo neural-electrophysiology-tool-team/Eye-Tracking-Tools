@@ -2946,7 +2946,7 @@ class BlockSync:
                 (ref_points.eye == 'R') & (ref_points.animal == int(self.animal_call.replace('PV_', ''))) & (
                         ref_points.block == int(self.block_num))]
             self.kerr_ref_r_x, self.kerr_ref_r_y = r_ref_row.x0.iloc[0], r_ref_row.y0.iloc[0]
-            print('found reference file and loaded points')
+            print('found reference file and loaded points',self.kerr_ref_l_x, self.kerr_ref_l_y,self.kerr_ref_r_x, self.kerr_ref_r_y)
         except FileNotFoundError:
             print(f'no reference file at {ref_file_path}')
 
