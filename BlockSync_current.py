@@ -728,7 +728,7 @@ class BlockSync:
                 else:
                     print(f'{sname} was not identified as {arena_channel_name}')
                 # create a counter for every rising edge - these should match video frames
-                s_counter = pd.Series(data=np.arange(len(s), dtype='Int32'),
+                s_counter = pd.Series(data=np.arange(len(s), dtype='int32'),
                                       index=s.index.values,
                                       name=sname + '_frame')
                 ls.append(s)
@@ -2885,8 +2885,11 @@ class BlockSync:
         # horizontally flip frame if applicable:
         if xflip:
             frame = cv2.flip(frame, 1)
-
-        rotated_frame = cv2.warpAffine(frame, rotation_matrix, (frame.shape[1], frame.shape[0]))
+        if rotation_matrix is not None:
+            rotated_frame = cv2.warpAffine(frame, rotation_matrix, (frame.shape[1], frame.shape[0]))
+        else:
+            print('did not use a rotation matrix')
+            rotated_frame = frame
         return rotated_frame
 
 
