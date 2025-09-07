@@ -1526,7 +1526,7 @@ class BlockSync:
             self.le_df = self.final_sync_df.drop(labels=['Arena_frame', 'R_eye_frame'], axis=1)
             self.re_df = self.final_sync_df.drop(labels=['Arena_frame', 'L_eye_frame'], axis=1)
         except AttributeError:
-            print('Missing something, probably final_sync_df, have you done manual sync?')
+            print('Missing something, probably final_sync_df, have you gone through manual sync?')
 
         # use frame numbers as the hooks to merge data and frame-timestamp relationships
         self.le_df = self.le_df.merge(self.le_ellipses, left_on='L_eye_frame', right_index=True, how='left')

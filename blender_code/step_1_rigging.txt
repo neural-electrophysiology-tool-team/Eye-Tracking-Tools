@@ -1,0 +1,129 @@
+# ================================
+# RIGGING STEP 1: Camera look-at
+# ================================
+import bpy, math
+from mathutils import Vector
+
+def rig_camera_look_at_ref(
+    reference_object_name: str,
+    camera_name: str,
+    above_distance: float = 1.0,          # meters "above" along world +Z
+    use_world_above: bool = True,         # if False: uses ref's local +Z
+    up_hint_world: Vector = Vector((0,1,0)),
+    image_path: str | None = None,
+    image_empty_name: str | None = None,
+    image_distance: float = 0.5,
+    image_opacity: float = 0.5,
+    match_camera_fov: bool = True
+):
+    """
+    Place camera above the reference and rotate it so camera -Z aims at the reference.
+    Optionally rig an IMAGE empty in front of the camera, facing the lens.
+    """
+    # --- fetch ---
+    ref = bpy.data.objects.get(reference_object_name)
+    cam = bpy.data.objects.get(camera_name)
+    if ref is None or cam is None:
+        raise RuntimeError(f"Missing objects: ref={reference_object_name!r} cam={camera_name!r}")
+
+    # --- compute world-space positions ---
+    ref_pos = ref.matrix_world.translation.copy()
+    if use_world_above:
+        above_vec = Vector((0,0,1))
+    else:
+        above_vec = (ref.matrix_world.to_quaternion() @ Vector((0,0,1)))
+    if above_vec.length == 0:
+        above_vec = Vector((0,0,1))
+    above_vec.normalize()
+    cam_pos = ref_pos + above_vec * float(above_distance)
+
+    # --- orient: make camera look at reference (track -Z to dir) ---
+    to_target = (ref_pos - cam_pos).normalized()
+    # Align camera's -Z to target direction; keep Y as the up-like axis
+    quat = to_target.to_track_quat('-Z', 'Y')
+
+    # --- apply world transform (temporarily unparent to avoid inheritance surprises) ---
+    cam.parent = None
+    cam.rotation_mode = 'QUATERNION'
+    cam.rotation_quaternion = quat
+    cam.location = cam_pos
+
+    # --- parent to reference but KEEP world transform ---
+    cam.parent = ref
+    cam.matrix_parent_inverse = ref.matrix_world.inverted()
+
+    # --- debug prints ---
+    cam_fwd = cam.rotation_quaternion @ Vector((0,0,-1))
+    align_dot = cam_fwd.dot((ref_pos - cam_pos).normalized())
+    print(f"[rig] {camera_name}: placed at {tuple(cam_pos)} looking at {tuple(ref_pos)}")
+    print(f"[rig] forward·(ref-cam) = {align_dot:+.3f} (expect ~+1.000)")
+
+    # --- optional image overlay in front of the camera ---
+    if image_path and image_empty_name:
+        # create/fetch empty
+        img_empty = bpy.data.objects.get(image_empty_name)
+        if img_empty is None:
+            bpy.ops.object.empty_add(type='IMAGE')
+            img_empty = bpy.context.active_object
+            img_empty.name = image_empty_name
+
+        # load image
+        image_basename = bpy.path.basename(image_path)
+        img = bpy.data.images.get(image_basename) or bpy.data.images.load(image_path)
+        img_empty.data = img
+        img_empty.empty_display_type = 'IMAGE'
+
+        # parent to camera (keep world transform)
+        img_empty.parent = cam
+        img_empty.matrix_parent_inverse = cam.matrix_world.inverted()
+
+        # place in front of camera along its forward (-Z)
+        cam_fwd = cam.rotation_quaternion @ Vector((0,0,-1))
+        img_empty.location = cam.location + cam_fwd * float(image_distance)
+
+        # make the image face the camera: start from camera rotation, flip 180° about local X
+        img_empty.rotation_mode = 'QUATERNION'
+        img_empty.rotation_quaternion = cam.rotation_quaternion.copy()
+        # Switch to Euler just to apply a simple 180° flip, then back (ok for one-off)
+        eul = img_empty.rotation_euler
+        eul.rotate_axis('X', math.radians(180.0))
+        img_empty.rotation_euler = eul
+
+        # size to match camera frustum height at that distance (optional)
+        if match_camera_fov:
+            fov_y = cam.data.angle_y  # radians
+            vis_h = 2.0 * image_distance * math.tan(fov_y * 0.5)
+            img_empty.empty_display_size = vis_h
+        else:
+            img_empty.empty_display_size = 1.0
+
+        img_empty.show_in_front = True
+        img_empty.color[3] = image_opacity
+        print(f"[rig] overlay '{image_empty_name}' set at d={image_distance:.3f} m, opacity={image_opacity}")
+
+# -----------------
+# EXAMPLE CALLS
+# -----------------
+# Left eye:
+rig_camera_look_at_ref(
+reference_object_name="l_eye_ref",
+camera_name="L_Camera",
+above_distance=1.0,
+use_world_above=True,  # or False to use the ref's local +Z as "above"
+image_path=r"D:\MarkS3\Documents\BlenderFiles\Camera_angle_registration\PV_106_registration\pv_106_left_eye_img.PNG",
+image_empty_name="OverlayPlane_l",
+image_distance=0.5,
+image_opacity=0.5,
+match_camera_fov=True
+)
+
+# Right eye (similar):
+rig_camera_look_at_ref(
+reference_object_name="r_eye_ref",
+camera_name="R_Camera",
+above_distance=1.0,
+use_world_above=True,
+image_path=r"D:\MarkS3\Documents\BlenderFiles\Camera_angle_registration\PV_106_registration\pv_106_right_eye_img.PNG",
+image_empty_name="OverlayPlane_r",
+image_distance=0.5
+)

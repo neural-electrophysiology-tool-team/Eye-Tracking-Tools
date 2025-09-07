@@ -1,0 +1,83 @@
+# and here's a verification function
+import bpy, os, json, mathutils
+
+# ======================================================================
+# Blender Verification v3: Compatible with v11 JSON format
+#   - Reads *_rot_matrix_v11.json and *_normals_v11.json (n_ref & n_img only)
+#   - Ignores 'cam_forward' key if absent
+#   - Duplicates image-plane, applies rotation, and
+#     draws reference plane using n_ref.
+# ======================================================================
+
+def load_rotation(path):
+    """Load 3×3 rotation JSON into a 4×4 Matrix."""
+    raw = json.load(open(path, 'r'))
+    M3  = mathutils.Matrix([[raw[i][j] for j in range(3)] for i in range(3)])
+    return M3.to_4x4()
+
+
+def load_normals(path):
+    """Load normals JSON with keys 'n_ref' and optionally 'n_img'."""
+    data = json.load(open(path, 'r'))
+    n_ref = mathutils.Vector(data['n_ref']).normalized()
+    # n_img may be present or omitted
+    n_img = mathutils.Vector(data.get('n_img', [0,0,1])).normalized()
+    return n_ref, n_img
+
+
+def visualize_alignment(side: str):
+    """
+    Duplicate the <side>_image plane, apply the rotation matrix,
+    and place an anatomical reference plane at the eye center using n_ref.
+    """
+    blend_fp = bpy.data.filepath
+    proj_dir = os.path.dirname(blend_fp)
+    rot_fp   = os.path.join(proj_dir, f"{side}_rot_matrix_v14.json")
+    norm_fp  = os.path.join(proj_dir, f"{side}_normals_v14.json")
+
+    try:
+        R4      = load_rotation(rot_fp)
+        n_ref, n_img = load_normals(norm_fp)
+    except Exception as e:
+        print(f"Error loading JSON for {side}: {e}")
+        return
+
+    # Fetch objects
+    img_obj = bpy.data.objects.get(f"OverlayPlane_{side}")
+    eye_ctr = bpy.data.objects.get(f"{side}_eye_center").location.copy()
+
+    # Duplicate & rotate image plane
+    dup = img_obj.copy()
+    dup.data = img_obj.data.copy()
+    dup.name = f"{side}_image_rotated"
+    bpy.context.collection.objects.link(dup)
+    T1 = mathutils.Matrix.Translation(-eye_ctr)
+    T2 = mathutils.Matrix.Translation( eye_ctr)
+    print(T1,T2)
+    dup.matrix_world = T2 @ R4 @ T1 @ img_obj.matrix_world
+
+    # Create anatomical reference plane at eye center
+    bpy.ops.mesh.primitive_plane_add(size=0.5, location=eye_ctr)
+    ref = bpy.context.active_object
+    ref.name = f"{side}_anatom_ref_plane"
+    ref.rotation_mode = 'QUATERNION'
+    # Orient local +Z to n_ref
+    ref.rotation_quaternion = n_ref.to_track_quat('Z', 'Y')
+
+    # Apply semi-transparent red material
+    mat = bpy.data.materials.new(name=f"{side}_ref_mat")
+    mat.diffuse_color = (1.0, 0.0, 0.0, 0.3)
+    mat.blend_method  = 'BLEND'
+    if ref.data.materials:
+        ref.data.materials[0] = mat
+    else:
+        ref.data.materials.append(mat)
+
+
+def main():
+    print("[v3] Starting verification with v11 JSON format...")
+    for side in ('l', 'r'):
+        visualize_alignment(side)
+    print("[v3] Verification complete.")
+
+main()

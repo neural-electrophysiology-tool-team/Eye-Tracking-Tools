@@ -1,0 +1,159 @@
+# ===========================
+# compute_eye_alignment_v14_patched2
+#  - v14-compatible exports
+#  - robust hemisphere logic + PRE-FLIP of n_img to match camera forward
+# ===========================
+import bpy, os, math, mathutils, json
+from mathutils import Vector
+
+def align_vectors_at_point(eye_pt, v_from, v_to):
+    v1, v2 = v_from.normalized(), v_to.normalized()
+    dot = max(-1.0, min(1.0, v1.dot(v2)))
+    T1 = mathutils.Matrix.Translation(-eye_pt)
+    T2 = mathutils.Matrix.Translation( eye_pt)
+    if dot > 0.999999:
+        return mathutils.Matrix.Identity(4)
+    if dot < -0.999999:
+        axis = v1.orthogonal().normalized(); angle = math.pi
+    else:
+        axis = v1.cross(v2).normalized();    angle = math.acos(dot)
+    return T2 @ mathutils.Matrix.Rotation(angle, 4, axis) @ T1
+
+def angle_between_vectors_signed(v1, v2, normal):
+    u1, u2 = v1.normalized(), v2.normalized()
+    dot  = max(-1.0, min(1.0, u1.dot(u2)))
+    ang  = math.acos(dot)
+    sign = 1.0 if u1.cross(u2).dot(normal) > 0 else -1.0
+    return sign * ang
+
+def normalize_deg(a):
+    return (a + 180.0) % 360.0 - 180.0
+
+def _first_existing(names):
+    for nm in names:
+        o = bpy.data.objects.get(nm)
+        if o: return o
+    return None
+
+def compute_eye_alignment_v14_patched2(side, export_normals=True):
+    """
+    v14-compatible export, but:
+      1) Reads pure rotation for image basis (no scale bleed).
+      2) PRE-FLIP: if image +Z (n_img) opposes camera forward (-Z), flip n_img.
+      3) H1 hemisphere: align n_ref with camera forward if available; else with n_img.
+      4) H2 hemisphere: flip projected anatomical X if needed.
+    Prints a full audit for each step.
+    """
+    objs   = bpy.data.objects
+    eye    = objs[f"{side}_eye_center"].location.copy()
+    img    = objs[f"OverlayPlane_{side}"]
+    ear    = objs[f"{side}_ear"].location
+    nost   = objs[f"{side}_nostril"].location
+    mark   = objs[f"{side}_marker_3d1"].location
+
+    # --- 0) Anatomical normal ---
+    A = (nost - ear)
+    B = (mark - nost)
+    n_ref0 = A.cross(B)
+    if n_ref0.length < 1e-6:
+        raise ValueError(f"{side}: anatomical normal zero length (check landmark placement)")
+    n_ref0.normalize()
+
+    # --- 1) Image basis (pure rotation) ---
+    m_img = img.matrix_world.to_quaternion().to_matrix()
+    n_img = (m_img @ Vector((0,0,1))).normalized()       # image +Z (plane normal)
+    x_img = (m_img @ Vector((1,0,0))).normalized()       # image +X (in-plane)
+
+    # Camera forward (-Z) for hemisphere reference
+    cam = _first_existing([f"{side.upper()}_Camera", f"{side}_Camera",
+                           f"{side.lower()}_camera", f"{side}_camera"])
+    n_camf = None
+    if cam and cam.type == 'CAMERA':
+        q_cam  = cam.matrix_world.to_quaternion()
+        n_camf = (q_cam @ Vector((0,0,-1))).normalized()
+
+    print(f"[{side}] ---- v14-patched2 audit ----")
+    print(f"[{side}] n_ref0 (ear->nost × mark->nost) = {tuple(n_ref0)}")
+    print(f"[{side}] n_img  (image +Z)               = {tuple(n_img)}")
+    if n_camf: print(f"[{side}] cam_fwd (-Z)                = {tuple(n_camf)}")
+
+    # --- 1b) PRE-FLIP n_img if opposite camera forward ---
+    preflip_nimg = False
+    if n_camf and n_img.dot(n_camf) < 0:
+        n_img.negate()
+        x_img.negate()   # keep right-handed image basis after flipping +Z
+        preflip_nimg = True
+    if n_camf:
+        print(f"[{side}] PRE-FLIP n_img vs cam_fwd: flipped={preflip_nimg}  dot_now={n_img.dot(n_camf):+0.3f}")
+
+    # --- 2) Hemisphere H1: align n_ref with reference hemi vector (cam_fwd if available, else n_img) ---
+    hemi_vec = n_camf if n_camf is not None else n_img
+    H1_flipped = False
+    n_ref = n_ref0.copy()
+    if n_ref.dot(hemi_vec) < 0:
+        n_ref.negate()
+        H1_flipped = True
+    print(f"[{side}] H1: hemisphere via {'cam_fwd' if n_camf else 'n_img'} -> flipped={H1_flipped}")
+
+    # --- 3) Tilt: image +Z → n_ref (about eye center) ---
+    R_norm4 = align_vectors_at_point(eye, n_img, n_ref)
+
+    # --- 4) Roll: align current image +X (after tilt) to anatomical X (proj of A) ---
+    cur_x_t = (R_norm4.to_3x3() @ x_img).normalized()
+    anat_x_p = (A.normalized() - A.normalized().dot(n_ref)*n_ref)
+    if anat_x_p.length < 1e-9:
+        raise ValueError(f"{side}: anatomical X projection degenerate")
+    anat_x_p.normalize()
+
+    dot_proj = anat_x_p.dot(cur_x_t)
+    H2_flipped = False
+    if dot_proj < 0:
+        anat_x_p.negate()
+        H2_flipped = True
+    print(f"[{side}] H2: projection dot (anat→plane) = {dot_proj:+0.4f}  -> flip_anat_x_p={H2_flipped}")
+
+    raw_roll = angle_between_vectors_signed(cur_x_t, anat_x_p, n_ref)
+    roll_deg = normalize_deg(math.degrees(raw_roll))
+    print(f"[{side}] roll about n_ref (deg) = {roll_deg:+.2f}")
+
+    # --- 5) Compose (tilt + roll) ---
+    R_roll4 = (mathutils.Matrix.Translation( eye ) @
+               mathutils.Matrix.Rotation( raw_roll, 4, n_ref ) @
+               mathutils.Matrix.Translation(-eye ))
+    R_full3 = (R_roll4 @ R_norm4).to_3x3()
+
+    # --- 6) QC ---
+    mapped_n = (R_full3 @ n_img).normalized()
+    dot_after = mapped_n.dot(n_ref)
+    det_R = R_full3.determinant()
+    print(f"[{side}] QC: dot(R*n_img, n_ref) = {dot_after:+0.3f}  (expect ~+1.000)")
+    print(f"[{side}] QC: det(R_full3)        = {det_R:+0.3f}     (expect ~+1.000)")
+    print(f"[{side}] SUMMARY: preflip_nimg={preflip_nimg}, H1_flipped={H1_flipped}, H2_flipped={H2_flipped}, roll={roll_deg:+.2f}°")
+
+    # --- 7) Export (same v14 filenames) ---
+    proj_dir = os.path.dirname(bpy.data.filepath)
+    rot_path  = os.path.join(proj_dir, f"{side}_rot_matrix_v14.json")
+    data_path = os.path.join(proj_dir, f"{side}_data_matrix_v14.json")
+    with open(rot_path, 'w') as f:
+        json.dump([[R_full3[i][j] for j in range(3)] for i in range(3)], f, indent=2)
+    R_inv = R_full3.inverted()
+    with open(data_path, 'w') as f:
+        json.dump([[R_inv[i][j] for j in range(3)] for i in range(3)], f, indent=2)
+    print(f"[{side}] exported rot_matrix_v14 → {rot_path}")
+    print(f"[{side}] exported data_matrix_v14 → {data_path}")
+
+    if export_normals:
+        norm_path = os.path.join(proj_dir, f"{side}_normals_v14.json")
+        out_norms = {'n_ref': list(n_ref), 'n_img': list(n_img)}
+        if n_camf is not None: out_norms['cam_forward'] = list(n_camf)
+        with open(norm_path, 'w') as f:
+            json.dump(out_norms, f, indent=2)
+        print(f"[{side}] exported normals_v14  → {norm_path}")
+
+    return R_full3, R_inv, n_ref, n_img
+
+# Optional quick run:
+if __name__=='__main__':
+    for s in ('l','r'):
+        compute_eye_alignment_v14_patched2(s, export_normals=True)
+print("[v14-patched2] Done.")
