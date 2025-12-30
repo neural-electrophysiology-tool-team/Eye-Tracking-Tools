@@ -2953,7 +2953,6 @@ class BlockSync:
         except FileNotFoundError:
             print(f'no reference file at {ref_file_path}')
 
-    # you are here
     @staticmethod
     def kerr(df, aEC=np.nan, bEC=np.nan):
         if aEC != aEC:
